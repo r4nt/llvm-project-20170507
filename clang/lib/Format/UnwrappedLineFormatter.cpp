@@ -1146,6 +1146,7 @@ void UnwrappedLineFormatter::formatFirstToken(
                                    TokenIndent);
     return;
   }
+  //llvm::errs() << "NLB: " << RootToken.NewlinesBefore << "\n";
   unsigned Newlines =
       std::min(RootToken.NewlinesBefore, Style.MaxEmptyLinesToKeep + 1);
   // Remove empty lines before "}" where applicable.
@@ -1158,8 +1159,10 @@ void UnwrappedLineFormatter::formatFirstToken(
   // Remove empty lines at the start of nested blocks (lambdas/arrow functions)
   if (PreviousLine == nullptr && Line.Level > 0)
     Newlines = std::min(Newlines, 1u);
+  //llvm::errs() << "NLB4: " << Newlines << "\n";
   if (Newlines == 0 && !RootToken.IsFirst)
     Newlines = 1;
+  //llvm::errs() << "NLB3: " << Newlines << "\n";
   if (RootToken.IsFirst && !RootToken.HasUnescapedNewline)
     Newlines = 0;
 

@@ -1231,6 +1231,8 @@ struct FormatStyle {
   /// A regular expression matching macros that end a block.
   std::string MacroBlockEnd;
 
+  std::vector<std::string> Macros;
+
   /// The maximum number of consecutive empty lines to keep.
   /// \code
   ///    MaxEmptyLinesToKeep: 1         vs.     MaxEmptyLinesToKeep: 0

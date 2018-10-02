@@ -303,6 +303,8 @@ struct FormatToken {
   /// changes.
   bool Finalized = false;
 
+  bool Annotated = false;
+
   bool is(tok::TokenKind Kind) const { return Tok.is(Kind); }
   bool is(TokenType TT) const { return Type == TT; }
   bool is(const IdentifierInfo *II) const {

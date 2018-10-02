@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "UnwrappedLineParser.h"
+#include "FormatTokenLexer.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -32,6 +33,8 @@ public:
 
   virtual unsigned getPosition() = 0;
   virtual FormatToken *setPosition(unsigned Position) = 0;
+
+  virtual void prependTokens(ArrayRef<FormatToken *> Tokens) = 0;
 };
 
 namespace {
@@ -116,6 +119,10 @@ public:
     return Token;
   }
 
+  void prependTokens(ArrayRef<FormatToken *> Tokens) override {
+    assert(false && "Cannot insert tokens while parsing a macro (yet).");
+  }
+
 private:
   bool eof() {
     return Token && Token->HasUnescapedNewline &&
@@ -190,11 +197,19 @@ namespace {
 
 class IndexedTokenSource : public FormatTokenSource {
 public:
-  IndexedTokenSource(ArrayRef<FormatToken *> Tokens)
+  IndexedTokenSource(SmallVectorImpl<FormatToken *>& Tokens)
       : Tokens(Tokens), Position(-1) {}
 
   FormatToken *getNextToken() override {
+    /*if (Position > 0 && Tokens[Position]->is(tok::eof)) {
+      llvm::errs() << "Stuck in eof\n";
+      return Tokens[Position];
+    }*/
     ++Position;
+    auto it = Jumps.find(Position);
+    if (it != Jumps.end()) {
+      Position = it->second;
+    }
     return Tokens[Position];
   }
 
@@ -208,20 +223,29 @@ public:
     return Tokens[Position];
   }
 
+  void prependTokens(ArrayRef<FormatToken *> New) override {
+    int Next = Tokens.size();
+    Tokens.append(New.begin(), New.end());
+    Jumps[Tokens.size()-1] = Position;
+    Position = Next-1;
+  }
+
   void reset() { Position = -1; }
 
 private:
-  ArrayRef<FormatToken *> Tokens;
+  SmallVectorImpl<FormatToken *>& Tokens;
   int Position;
+  std::map<int, int> Jumps;
 };
 
 } // end anonymous namespace
 
-UnwrappedLineParser::UnwrappedLineParser(const FormatStyle &Style,
-                                         const AdditionalKeywords &Keywords,
-                                         unsigned FirstStartColumn,
-                                         ArrayRef<FormatToken *> Tokens,
-                                         UnwrappedLineConsumer &Callback)
+UnwrappedLineParser::UnwrappedLineParser(
+    SourceManager &SourceMgr, const FormatStyle &Style,
+    encoding::Encoding Encoding, const AdditionalKeywords &Keywords,
+    unsigned FirstStartColumn, SmallVectorImpl<FormatToken *> &Tokens,
+    UnwrappedLineConsumer &Callback,
+    llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator)
     : Line(new UnwrappedLine), MustBreakBeforeNextToken(false),
       CurrentLines(&Lines), Style(Style), Keywords(Keywords),
       CommentPragmasRegex(Style.CommentPragmas), Tokens(nullptr),
@@ -229,7 +253,9 @@ UnwrappedLineParser::UnwrappedLineParser(const FormatStyle &Style,
       IncludeGuard(Style.IndentPPDirectives == FormatStyle::PPDIS_None
                        ? IG_Rejected
                        : IG_Inited),
-      IncludeGuardToken(nullptr), FirstStartColumn(FirstStartColumn) {}
+      IncludeGuardToken(nullptr), FirstStartColumn(FirstStartColumn),
+      M(Style.Macros, SourceMgr, Style), SourceMgr(SourceMgr),
+      Encoding(Encoding), Allocator(Allocator) {}
 
 void UnwrappedLineParser::reset() {
   PPBranchLevel = -1;
@@ -274,7 +300,11 @@ void UnwrappedLineParser::parse() {
     for (SmallVectorImpl<UnwrappedLine>::iterator I = Lines.begin(),
                                                   E = Lines.end();
          I != E; ++I) {
+      UnwrappedLine Unexpanded = *I;
+      if (unexpandLine(Unexpanded))
+        Callback.consumeUnwrappedLine(Unexpanded);
       Callback.consumeUnwrappedLine(*I);
+      // todo2
     }
     Callback.finishRun();
     Lines.clear();
@@ -289,6 +319,31 @@ void UnwrappedLineParser::parse() {
       assert(PPLevelBranchIndex.back() <= PPLevelBranchCount.back());
     }
   } while (!PPLevelBranchIndex.empty());
+}
+
+bool UnwrappedLineParser::unexpandLine(UnwrappedLine &Line) {
+  bool Unexpanded = false;
+  auto T = Line.Tokens.begin();
+  while (T != Line.Tokens.end()) {
+    //llvm::errs() << "Expanding: " << T->Tok->TokenText << "\n";
+    auto Expanded = ExpandedLines.find(T->Tok);
+    if (Expanded != ExpandedLines.end()) {
+      Unexpanded = true;
+      //llvm::errs() << "Inserting...\n";
+      Line.Tokens.insert(T, Expanded->second.first->Tokens.begin(),
+                         Expanded->second.first->Tokens.end());
+      //llvm::errs() << "Num: " << Expanded->second.second << "\n";
+      for (int I = 0, E = Expanded->second.second; I != E; ++I) {
+        //llvm::errs() << "Erasing: " << T->Tok->TokenText << "\n";
+        assert(T != Line.Tokens.end());
+        T = Line.Tokens.erase(T);
+      }
+      continue;
+    }
+    ++T;
+  }
+  // FIXME: Unexpand children!
+  return Unexpanded;
 }
 
 void UnwrappedLineParser::parseFile() {
@@ -2624,7 +2679,45 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
       continue;
     }
 
+// TODO!!!
+    if (FormatTok->is(tok::identifier) && M.Defined(FormatTok->TokenText)) {
+      std::string ID = FormatTok->TokenText;
+      auto PreCall = std::move(Line);
+      Line.reset(new UnwrappedLine);
+      
+      parseMacroCall();
+      std::string Call;
+      for (const auto& Tok : Line->Tokens) {
+        Call.append(Tok.Tok->TokenText);
+      }
+      //for (const auto& s : Params) llvm::errs() << "p: " << s << "\n";
+      std::string Expanded = M.Expand(Call);
+      auto Buffer = llvm::MemoryBuffer::getMemBufferCopy(Expanded, "<scratch space>");
+      clang::FileID FID = SourceMgr.createFileID(std::move(Buffer));
+      FormatTokenLexer Lex(SourceMgr, FID, /*Column=*/0, Style, Encoding, Allocator);
+      ArrayRef<FormatToken*> New = Lex.lex();
+      for (FormatToken* Tok : New) {
+        if (SourceMgr.getFileID(Tok->getStartOfNonWhitespace()) == FID) {
+          Tok->Finalized = true;
+        }
+      }
+      //llvm::errs() << "S: " << New.size() << "\n";
+      //for (FormatToken* f : New) { llvm::errs() << "New: " << f->TokenText << "\n"; }
+      Tokens->prependTokens(New);
+
+
+      FormatTok = Tokens->getNextToken();
+      assert(ExpandedLines.find(FormatTok) == ExpandedLines.end());
+      // Do not count the EOL token in the size.
+      ExpandedLines[FormatTok] = {std::move(Line), New.size()-1};
+      Line = std::move(PreCall);
+      //llvm::errs() << "1: " << FormatTok->TokenText << "\n";
+      //AllTokens.append(New.begin(), New.end());
+      // inject the expanded text
+    }
+
     if (!FormatTok->Tok.is(tok::comment)) {
+      //llvm::errs() << FormatTok->TokenText << "\n";
       distributeComments(Comments, FormatTok);
       Comments.clear();
       return;
@@ -2637,12 +2730,61 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
   Comments.clear();
 }
 
+//FIXME!! Change to void.
+std::vector<std::string> UnwrappedLineParser::parseMacroCall() {
+  // TODO: put into different line
+  nextToken();
+  if (FormatTok->isNot(tok::l_paren)) {
+    //llvm::errs() << "huh?\n";
+    return {};
+  }
+  nextToken();
+  
+  std::vector<std::string> Args;
+  auto Start = FormatTok->getStartOfNonWhitespace();
+  do {
+    switch (FormatTok->Tok.getKind()) {
+    case tok::l_paren:
+      parseParens();
+      break;
+    case tok::r_paren: {
+      auto Last = FormatTok->Previous->getStartOfNonWhitespace();
+      Args.push_back(
+          Lexer::getSourceText(CharSourceRange::getTokenRange(Start, Last),
+                               SourceMgr, getFormattingLangOpts(Style)));
+      nextToken();
+      return Args;
+    }
+    case tok::comma: {
+      auto Last = FormatTok->Previous->getStartOfNonWhitespace();
+      Args.push_back(
+          Lexer::getSourceText(CharSourceRange::getTokenRange(Start, Last),
+                               SourceMgr, getFormattingLangOpts(Style)));
+      nextToken();
+      Start = FormatTok->getStartOfNonWhitespace();
+      break;
+    }
+    default:
+      nextToken();
+      break;
+    }
+  } while(!eof());
+  return {};
+}
+
 void UnwrappedLineParser::pushToken(FormatToken *Tok) {
   Line->Tokens.push_back(UnwrappedLineNode(Tok));
   if (MustBreakBeforeNextToken) {
     Line->Tokens.back().Tok->MustBreakBefore = true;
     MustBreakBeforeNextToken = false;
   }
+  /*
+  auto it = ExpandedLines.find(Tok);
+  if (it != ExpandedLines.end()) {
+    Line->Tokens.back().Children.push_back(*it->second);
+    ExpandedLines.erase(Tok);
+  }
+  */
 }
 
 } // end namespace format

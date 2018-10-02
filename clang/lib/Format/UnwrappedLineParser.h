@@ -16,7 +16,9 @@
 #ifndef LLVM_CLANG_LIB_FORMAT_UNWRAPPEDLINEPARSER_H
 #define LLVM_CLANG_LIB_FORMAT_UNWRAPPEDLINEPARSER_H
 
+#include "Encoding.h"
 #include "FormatToken.h"
+#include "Macros.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Format/Format.h"
 #include "llvm/Support/Regex.h"
@@ -75,11 +77,13 @@ class FormatTokenSource;
 
 class UnwrappedLineParser {
 public:
-  UnwrappedLineParser(const FormatStyle &Style,
+  UnwrappedLineParser(SourceManager &SourceMgr, const FormatStyle &Style,
+                      encoding::Encoding Encoding,
                       const AdditionalKeywords &Keywords,
                       unsigned FirstStartColumn,
-                      ArrayRef<FormatToken *> Tokens,
-                      UnwrappedLineConsumer &Callback);
+                      SmallVectorImpl<FormatToken *> &Tokens,
+                      UnwrappedLineConsumer &Callback,
+                      llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator);
 
   void parse();
 
@@ -129,6 +133,9 @@ private:
   bool tryToParseLambda();
   bool tryToParseLambdaIntroducer();
   void tryToParseJSFunction();
+
+  std::vector<std::string> parseMacroCall();
+ 
   void addUnwrappedLine();
   bool eof() const;
   // LevelDifference is the difference of levels after and before the current
@@ -167,6 +174,8 @@ private:
 
   bool isOnNewLine(const FormatToken &FormatTok);
 
+  bool unexpandLine(UnwrappedLine &Line);
+
   // Compute hash of the current preprocessor branch.
   // This is used to identify the different branches, and thus track if block
   // open and close in the same branch.
@@ -176,6 +185,9 @@ private:
   // subtracted from beyond 0. Introduce a method to subtract from Line.Level
   // and use that everywhere in the Parser.
   std::unique_ptr<UnwrappedLine> Line;
+
+  std::map<FormatToken *, std::pair<std::unique_ptr<UnwrappedLine>, int>> ExpandedLines;
+  //std::unique_ptr<UnwrappedLine> ExpandedLine;
 
   // Comments are sorted into unwrapped lines by whether they are in the same
   // line as the previous token, or not. If not, they belong to the next token.
@@ -214,7 +226,9 @@ private:
   // FIXME: This is a temporary measure until we have reworked the ownership
   // of the format tokens. The goal is to have the actual tokens created and
   // owned outside of and handed into the UnwrappedLineParser.
-  ArrayRef<FormatToken *> AllTokens;
+  // FIXME: The above fixme doesn't work if we need to create tokens while
+  // parsing.
+  SmallVectorImpl<FormatToken *>& AllTokens;
 
   // Represents preprocessor branch type, so we can find matching
   // #if/#else/#endif directives.
@@ -274,6 +288,12 @@ private:
   // normal source code and may be nonzero when formatting a code fragment that
   // does not start at the beginning of the file.
   unsigned FirstStartColumn;
+
+  Macros M;
+
+  SourceManager &SourceMgr;
+  encoding::Encoding Encoding;
+  llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator;
 
   friend class ScopedLineState;
   friend class CompoundStatementIndenter;

@@ -25,13 +25,14 @@ namespace format {
 
 FormatTokenLexer::FormatTokenLexer(const SourceManager &SourceMgr, FileID ID,
                                    unsigned Column, const FormatStyle &Style,
-                                   encoding::Encoding Encoding)
+                                   encoding::Encoding Encoding,
+                                   llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator)
     : FormatTok(nullptr), IsFirstToken(true), StateStack({LexerState::NORMAL}),
       Column(Column), TrailingWhitespace(0), SourceMgr(SourceMgr), ID(ID),
       Style(Style), IdentTable(getFormattingLangOpts(Style)),
       Keywords(IdentTable), Encoding(Encoding), FirstInLineIndex(0),
       FormattingDisabled(false), MacroBlockBeginRegex(Style.MacroBlockBegin),
-      MacroBlockEndRegex(Style.MacroBlockEnd) {
+      MacroBlockEndRegex(Style.MacroBlockEnd), Allocator(Allocator) {
   Lex.reset(new Lexer(ID, SourceMgr.getBuffer(ID), SourceMgr,
                       getFormattingLangOpts(Style)));
   Lex->SetKeepWhitespaceMode(true);
