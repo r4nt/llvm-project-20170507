@@ -254,7 +254,7 @@ UnwrappedLineParser::UnwrappedLineParser(
                        ? IG_Rejected
                        : IG_Inited),
       IncludeGuardToken(nullptr), FirstStartColumn(FirstStartColumn),
-      M(Style.Macros, SourceMgr, Style), SourceMgr(SourceMgr),
+      M(Style.Macros, SourceMgr, Style, Encoding, Allocator), SourceMgr(SourceMgr),
       Encoding(Encoding), Allocator(Allocator) {}
 
 void UnwrappedLineParser::reset() {
@@ -272,6 +272,7 @@ void UnwrappedLineParser::reset() {
   DeclarationScopeStack.clear();
   PPStack.clear();
   Line->FirstStartColumn = FirstStartColumn;
+  // FIXME: Macro stuff.
 }
 
 void UnwrappedLineParser::parse() {
@@ -297,12 +298,18 @@ void UnwrappedLineParser::parse() {
     pushToken(FormatTok);
     addUnwrappedLine();
 
+    for (const auto &Line : ExpandedLines) {
+      Callback.consumeUnwrappedLine(Line);
+    }
+    Callback.finishRun();
+
     for (SmallVectorImpl<UnwrappedLine>::iterator I = Lines.begin(),
                                                   E = Lines.end();
          I != E; ++I) {
-      UnwrappedLine Unexpanded = *I;
-      if (unexpandLine(Unexpanded))
-        Callback.consumeUnwrappedLine(Unexpanded);
+      //UnwrappedLine Unexpanded = *I;
+      //if (unexpandLine(Unexpanded)) {
+      //  Callback.consumeUnwrappedLine(Unexpanded);
+      //}
       Callback.consumeUnwrappedLine(*I);
       // todo2
     }
@@ -320,7 +327,7 @@ void UnwrappedLineParser::parse() {
     }
   } while (!PPLevelBranchIndex.empty());
 }
-
+/*
 bool UnwrappedLineParser::unexpandLine(UnwrappedLine &Line) {
   bool Unexpanded = false;
   auto T = Line.Tokens.begin();
@@ -345,6 +352,7 @@ bool UnwrappedLineParser::unexpandLine(UnwrappedLine &Line) {
   // FIXME: Unexpand children!
   return Unexpanded;
 }
+*/
 
 void UnwrappedLineParser::parseFile() {
   // The top-level context in a file always has declarations, except for pre-
@@ -2409,6 +2417,16 @@ LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
   llvm::dbgs() << "\n";
 }
 
+bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *Tok) {
+  for (const auto &N : Line.Tokens) {
+    if (N.Tok == Tok) return true;
+    for (const UnwrappedLine &Child : N.Children) {
+      if (containsToken(Child, Tok)) return true;
+    }
+  }
+  return false;
+}
+
 void UnwrappedLineParser::addUnwrappedLine() {
   if (Line->Tokens.empty())
     return;
@@ -2416,7 +2434,15 @@ void UnwrappedLineParser::addUnwrappedLine() {
     if (CurrentLines == &Lines)
       printDebugInfo(*Line);
   });
-  CurrentLines->push_back(std::move(*Line));
+  if (Expanding) {
+    ExpandedLines.push_back(std::move(*Line));
+    if (containsToken(*Line, ExpandUntil)) {
+      Expanding = false;
+      ExpandUntil = nullptr;
+    }
+  } else {
+    CurrentLines->push_back(std::move(*Line));
+  }
   Line->Tokens.clear();
   Line->MatchingOpeningBlockLineIndex = UnwrappedLine::kInvalidIndex;
   Line->FirstStartColumn = 0;
@@ -2680,40 +2706,58 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
     }
 
 // TODO!!!
+
     if (FormatTok->is(tok::identifier) && M.Defined(FormatTok->TokenText)) {
-      std::string ID = FormatTok->TokenText;
-      auto PreCall = std::move(Line);
-      Line.reset(new UnwrappedLine);
-      
-      parseMacroCall();
-      std::string Call;
-      for (const auto& Tok : Line->Tokens) {
-        Call.append(Tok.Tok->TokenText);
-      }
-      //for (const auto& s : Params) llvm::errs() << "p: " << s << "\n";
-      std::string Expanded = M.Expand(Call);
-      auto Buffer = llvm::MemoryBuffer::getMemBufferCopy(Expanded, "<scratch space>");
-      clang::FileID FID = SourceMgr.createFileID(std::move(Buffer));
-      FormatTokenLexer Lex(SourceMgr, FID, /*Column=*/0, Style, Encoding, Allocator);
-      ArrayRef<FormatToken*> New = Lex.lex();
-      for (FormatToken* Tok : New) {
-        if (SourceMgr.getFileID(Tok->getStartOfNonWhitespace()) == FID) {
-          Tok->Finalized = true;
+      if (ParsingMacroLine) {
+        ++ToExpand;
+      } else {
+        if (ToExpand > 0) {
+          --ToExpand;
+        } else {
+          unsigned StoredPosition = Tokens->getPosition();
+          ParsingMacroLine = true;
+          auto PreParse = std::move(Line);
+          Line.reset(new UnwrappedLine(*PreParse));
+          parseStructuralElement();
+          addUnwrappedLine();
+          // FIXME: push line if not empty?
+          Line = std::move(PreParse);
+          ParsingMacroLine = false;
+          Expanding = true;
+          assert(ExpandUntil == nullptr);
+          ExpandUntil = FormatTok;
+          FormatTok = Tokens->setPosition(StoredPosition);
+        }
+        // FIXME: reset the rest of the state?
+
+        std::string ID = FormatTok->TokenText;
+        auto PreCall = std::move(Line);
+        Line.reset(new UnwrappedLine);
+        auto Args = parseMacroCall();
+        Line = std::move(PreCall);
+
+        LLVM_DEBUG({
+          llvm::dbgs() << "Call: " << ID << "(";
+          for (const auto &Arg : Args) {
+            for (const auto &T : Arg)
+              llvm::dbgs() << T->TokenText << " ";
+          }
+          llvm::dbgs() << ")\n";
+        });
+
+        SmallVector<FormatToken *, 8> New = M.Expand2(ID, Args);
+        LLVM_DEBUG({
+          llvm::dbgs() << "Expanded: ";
+          for (const auto &T : New) {
+            llvm::dbgs() << T->TokenText << " ";
+          }
+          llvm::dbgs() << "\n";
+        });
+        if (!New.empty()) {
+          Tokens->prependTokens(New);
+          FormatTok = Tokens->getNextToken();
         }
       }
-      //llvm::errs() << "S: " << New.size() << "\n";
-      //for (FormatToken* f : New) { llvm::errs() << "New: " << f->TokenText << "\n"; }
-      Tokens->prependTokens(New);
-
-
-      FormatTok = Tokens->getNextToken();
-      assert(ExpandedLines.find(FormatTok) == ExpandedLines.end());
-      // Do not count the EOL token in the size.
-      ExpandedLines[FormatTok] = {std::move(Line), New.size()-1};
-      Line = std::move(PreCall);
-      //llvm::errs() << "1: " << FormatTok->TokenText << "\n";
-      //AllTokens.append(New.begin(), New.end());
-      // inject the expanded text
     }
 
     if (!FormatTok->Tok.is(tok::comment)) {
@@ -2731,37 +2775,46 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
 }
 
 //FIXME!! Change to void.
-std::vector<std::string> UnwrappedLineParser::parseMacroCall() {
+llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::parseMacroCall() {
+  llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> Args;
+  assert(Line->Tokens.empty());
   // TODO: put into different line
   nextToken();
   if (FormatTok->isNot(tok::l_paren)) {
-    //llvm::errs() << "huh?\n";
-    return {};
+    llvm::errs() << FormatTok->Tok.getName() << "\n";
+    llvm::errs() << "huh?\n";
+    return Args;
   }
   nextToken();
+  auto LastEnd = std::prev(Line->Tokens.end());
   
-  std::vector<std::string> Args;
-  auto Start = FormatTok->getStartOfNonWhitespace();
+  //auto Start = FormatTok->getStartOfNonWhitespace();
+  int Parens = 0;
   do {
     switch (FormatTok->Tok.getKind()) {
     case tok::l_paren:
-      parseParens();
+      ++Parens;
+      nextToken();
       break;
     case tok::r_paren: {
-      auto Last = FormatTok->Previous->getStartOfNonWhitespace();
-      Args.push_back(
-          Lexer::getSourceText(CharSourceRange::getTokenRange(Start, Last),
-                               SourceMgr, getFormattingLangOpts(Style)));
+      if (Parens > 0) {
+        --Parens;
+        break;
+      }
+      //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
+      Args.push_back({});
+      for (auto I = std::next(LastEnd), E = Line->Tokens.end(); I != E; ++I)
+        Args.back().push_back(I->Tok);
       nextToken();
       return Args;
     }
     case tok::comma: {
-      auto Last = FormatTok->Previous->getStartOfNonWhitespace();
-      Args.push_back(
-          Lexer::getSourceText(CharSourceRange::getTokenRange(Start, Last),
-                               SourceMgr, getFormattingLangOpts(Style)));
+      //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
+      Args.push_back({});
+      for (auto I = std::next(LastEnd), E = Line->Tokens.end(); I != E; ++I)
+        Args.back().push_back(I->Tok);
       nextToken();
-      Start = FormatTok->getStartOfNonWhitespace();
+      LastEnd = std::prev(Line->Tokens.end());
       break;
     }
     default:

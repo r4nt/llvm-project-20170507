@@ -200,7 +200,9 @@ struct FormatToken {
 
   /// A token can have a special role that can carry extra information
   /// about the token's formatting.
-  std::unique_ptr<TokenRole> Role;
+  /// FIXME: Make FormatToken for parsing and AnnotatedToken two different
+  /// classes and make this a unique_ptr in the AnnotatedToken class.
+  std::shared_ptr<TokenRole> Role;
 
   /// If this is an opening parenthesis, how are the parameters packed?
   ParameterPackingKind PackingKind = PPK_Inconclusive;
@@ -533,10 +535,14 @@ struct FormatToken {
                                                                : nullptr;
   }
 
+  void copyInto(FormatToken &Tok) {
+    Tok = *this;
+  }
+
 private:
-  // Disallow copying.
+  // Only allow copying via the explicit copyInto method.
   FormatToken(const FormatToken &) = delete;
-  void operator=(const FormatToken &) = delete;
+  FormatToken &operator=(const FormatToken &) = default;
 
   template <typename A, typename... Ts>
   bool startsSequenceInternal(A K1, Ts... Tokens) const {

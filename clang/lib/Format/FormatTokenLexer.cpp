@@ -18,6 +18,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Format/Format.h"
+#include "clang/Lex/Preprocessor.h"
 #include "llvm/Support/Regex.h"
 
 namespace clang {
@@ -42,7 +43,7 @@ FormatTokenLexer::FormatTokenLexer(const SourceManager &SourceMgr, FileID ID,
   llvm::sort(ForEachMacros);
 }
 
-ArrayRef<FormatToken *> FormatTokenLexer::lex() {
+ArrayRef<FormatToken *> FormatTokenLexer::lexUntil(std::function<bool(FormatToken*)> End) {
   assert(Tokens.empty());
   assert(FirstInLineIndex == 0);
   do {
@@ -56,8 +57,12 @@ ArrayRef<FormatToken *> FormatTokenLexer::lex() {
     tryMergePreviousTokens();
     if (Tokens.back()->NewlinesBefore > 0 || Tokens.back()->IsMultiline)
       FirstInLineIndex = Tokens.size() - 1;
-  } while (Tokens.back()->Tok.isNot(tok::eof));
+  } while(!End(Tokens.back()));
   return Tokens;
+}
+
+ArrayRef<FormatToken *> FormatTokenLexer::lex() {
+  return lexUntil([](FormatToken *Tok) { return Tok->is(tok::eof); });
 }
 
 void FormatTokenLexer::tryMergePreviousTokens() {
@@ -230,6 +235,7 @@ void FormatTokenLexer::tryParseJSRegexLiteral() {
     return;
 
   // 'Manually' lex ahead in the current file buffer.
+  assert(!PP);
   const char *Offset = Lex->getBufferLocation();
   const char *RegexBegin = Offset - RegexToken->TokenText.size();
   StringRef Buffer = Lex->getBuffer();
@@ -263,6 +269,7 @@ void FormatTokenLexer::tryParseJSRegexLiteral() {
   RegexToken->TokenText = StringRef(RegexBegin, Offset - RegexBegin);
   RegexToken->ColumnWidth = RegexToken->TokenText.size();
 
+  assert(!PP);
   resetLexer(SourceMgr.getFileOffset(Lex->getSourceLocation(Offset)));
 }
 
@@ -288,6 +295,7 @@ void FormatTokenLexer::handleTemplateStrings() {
   }
 
   // 'Manually' lex ahead in the current file buffer.
+  assert(!PP);
   const char *Offset = Lex->getBufferLocation();
   const char *TmplBegin = Offset - BacktickToken->TokenText.size(); // at "`"
   for (; Offset != Lex->getBuffer().end(); ++Offset) {
@@ -327,6 +335,7 @@ void FormatTokenLexer::handleTemplateStrings() {
         Style.TabWidth, Encoding);
   }
 
+  assert(!PP);
   SourceLocation loc = Offset < Lex->getBuffer().end()
                            ? Lex->getSourceLocation(Offset + 1)
                            : SourceMgr.getLocForEndOfFile(ID);
@@ -338,6 +347,7 @@ void FormatTokenLexer::tryParsePythonComment() {
   if (!HashToken->isOneOf(tok::hash, tok::hashhash))
     return;
   // Turn the remainder of this line into a comment.
+  assert(!PP);
   const char *CommentBegin =
       Lex->getBufferLocation() - HashToken->TokenText.size(); // at "#"
   size_t From = CommentBegin - Lex->getBuffer().begin();
@@ -563,6 +573,7 @@ FormatToken *FormatTokenLexer::getNextToken() {
         const char *Offset = Lex->getBufferLocation();
         Offset -= FormatTok->TokenText.size();
         Offset += BackslashPos + 1;
+        assert(!PP);
         resetLexer(SourceMgr.getFileOffset(Lex->getSourceLocation(Offset)));
         FormatTok->TokenText = FormatTok->TokenText.substr(0, BackslashPos + 1);
         FormatTok->ColumnWidth = encoding::columnWidthWithTabs(
@@ -677,7 +688,10 @@ FormatToken *FormatTokenLexer::getNextToken() {
 }
 
 void FormatTokenLexer::readRawToken(FormatToken &Tok) {
-  Lex->LexFromRawLexer(Tok.Tok);
+  if (PP)
+    PP->Lex(Tok.Tok);
+  else
+    Lex->LexFromRawLexer(Tok.Tok);
   Tok.TokenText = StringRef(SourceMgr.getCharacterData(Tok.Tok.getLocation()),
                             Tok.Tok.getLength());
   // For formatting, treat unterminated string literals like normal string
@@ -714,6 +728,7 @@ void FormatTokenLexer::readRawToken(FormatToken &Tok) {
 
 void FormatTokenLexer::resetLexer(unsigned Offset) {
   StringRef Buffer = SourceMgr.getBufferData(ID);
+  assert(!PP);
   Lex.reset(new Lexer(SourceMgr.getLocForStartOfFile(ID),
                       getFormattingLangOpts(Style), Buffer.begin(),
                       Buffer.begin() + Offset, Buffer.end()));

@@ -20,7 +20,9 @@
 #include <vector>
 #include <unordered_map>
 
+#include "Encoding.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/ArrayRef.h"
 
 namespace llvm { class MemoryBuffer; }
 
@@ -29,23 +31,38 @@ class SourceManager;
 
 namespace format {
 struct FormatStyle;
+struct FormatToken;
 
 class Macros {
 public:
   Macros(const std::vector<std::string> &Macros,
-         clang::SourceManager &SourceMgr, const FormatStyle &Style);
+         clang::SourceManager &SourceMgr, const FormatStyle &Style,
+         encoding::Encoding encoding,
+         llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator);
   ~Macros();
   bool Defined(llvm::StringRef Name);
-  std::string Expand(llvm::StringRef Code);
+  //std::string Expand(llvm::StringRef Code);
+
+  llvm::SmallVector<FormatToken *, 8>
+  Expand2(llvm::StringRef Name,
+         llvm::ArrayRef<llvm::SmallVector<FormatToken *, 8>> Args);
+  //llvm::ArrayRef<FormatToken*> Expand(llvm::ArrayRef<FormatToken*> Call);
 
 private:
   struct PPState;
+  struct Definition;
+  class  DefinitionParser;
 
   void parseDefinitions(const std::vector<std::string> &Macros);
   std::string process(llvm::MemoryBuffer *Buffer);
 
   std::unique_ptr<PPState> PP;
-  std::vector<std::unique_ptr<llvm::MemoryBuffer>> Definitions;
+  const FormatStyle &Style;
+  encoding::Encoding Encoding;
+  llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator;
+  std::vector<std::unique_ptr<llvm::MemoryBuffer>> Buffers;
+
+  llvm::StringMap<Definition> Definitions;
 };
 
 } // namespace format

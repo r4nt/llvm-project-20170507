@@ -134,7 +134,7 @@ private:
   bool tryToParseLambdaIntroducer();
   void tryToParseJSFunction();
 
-  std::vector<std::string> parseMacroCall();
+  llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> parseMacroCall();
  
   void addUnwrappedLine();
   bool eof() const;
@@ -174,7 +174,8 @@ private:
 
   bool isOnNewLine(const FormatToken &FormatTok);
 
-  bool unexpandLine(UnwrappedLine &Line);
+  //bool unexpandLine(UnwrappedLine &Line);
+  bool containsToken(const UnwrappedLine &Line, FormatToken *Tok);
 
   // Compute hash of the current preprocessor branch.
   // This is used to identify the different branches, and thus track if block
@@ -186,8 +187,15 @@ private:
   // and use that everywhere in the Parser.
   std::unique_ptr<UnwrappedLine> Line;
 
-  std::map<FormatToken *, std::pair<std::unique_ptr<UnwrappedLine>, int>> ExpandedLines;
+  //std::map<FormatToken *, std::pair<std::unique_ptr<UnwrappedLine>, int>> ExpandedLines;
   //std::unique_ptr<UnwrappedLine> ExpandedLine;
+  //std::deque<clang::SourceLocation> ToExpand;
+  //int LineStartToken = 0;
+  bool ParsingMacroLine = false;
+  int ToExpand = 0;
+  bool Expanding = false;
+  FormatToken *ExpandUntil = nullptr;
+  SmallVector<UnwrappedLine, 8> ExpandedLines;
 
   // Comments are sorted into unwrapped lines by whether they are in the same
   // line as the previous token, or not. If not, they belong to the next token.

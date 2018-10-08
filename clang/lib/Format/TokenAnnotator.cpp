@@ -2826,6 +2826,8 @@ static bool isAllmanBrace(const FormatToken &Tok) {
 
 bool TokenAnnotator::mustBreakBefore(const AnnotatedLine &Line,
                                      const FormatToken &Right) {
+  if (!Right.Previous)
+    return true;
   const FormatToken &Left = *Right.Previous;
   if (Right.NewlinesBefore > 1 && Style.MaxEmptyLinesToKeep > 0)
     return true;
@@ -2869,6 +2871,7 @@ bool TokenAnnotator::mustBreakBefore(const AnnotatedLine &Line,
              Style.Language == FormatStyle::LK_ObjC ||
              Style.Language == FormatStyle::LK_Proto ||
              Style.Language == FormatStyle::LK_TextProto) {
+               llvm::errs() << "L: " << Right.Previous << " R: " << Right.TokenText << "\n";
     if (Left.isStringLiteral() && Right.isStringLiteral())
       return true;
   }
@@ -3320,8 +3323,9 @@ void TokenAnnotator::printDebugInfo(const AnnotatedLine &Line) {
     llvm::errs() << " FakeRParens=" << Tok->FakeRParens;
     llvm::errs() << " II=" << Tok->Tok.getIdentifierInfo();
     llvm::errs() << " Text='" << Tok->TokenText << "'\n";
-    if (!Tok->Next)
+    if (!Tok->Next) {
       assert(Tok == Line.Last);
+    }
     Tok = Tok->Next;
   }
   llvm::errs() << "----\n";

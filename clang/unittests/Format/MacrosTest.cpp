@@ -9,6 +9,7 @@ namespace clang {
 namespace format {
 namespace {
 
+/*
 TEST(MacrosTest, ReplacesIdentifier) {
   SourceManagerForFile SourceMgr("test", "");
   Macros M(std::vector<std::string>({"X x"}), SourceMgr.get(), getLLVMStyle());
@@ -22,6 +23,7 @@ TEST(MacrosTest, ReplacesCall) {
   EXPECT_TRUE(M.Defined("ID"));
   EXPECT_EQ("a * b", M.Expand("ID(a * b)"));
 }
+*/
 
 } // namespace
 } // namespace format
