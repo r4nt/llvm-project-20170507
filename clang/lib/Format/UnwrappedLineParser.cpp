@@ -2921,15 +2921,19 @@ llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::pa
   int Parens = 0;
   do {
     switch (FormatTok->Tok.getKind()) {
+    case tok::l_brace:
+      parseChildBlock();
+      break;
     case tok::l_paren:
-      ++Parens;
-      nextToken();
+      parseParens();
+      //++Parens;
+      //nextToken();
       break;
     case tok::r_paren: {
-      if (Parens > 0) {
-        --Parens;
-        break;
-      }
+      //if (Parens > 0) {
+      //  --Parens;
+      //  break;
+      //}
       //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
       Args.push_back({});
       for (auto I = std::next(LastEnd), E = Line->Tokens.end(); I != E; ++I)

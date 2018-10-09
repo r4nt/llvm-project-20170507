@@ -12151,6 +12151,7 @@ TEST_F(FormatTest, TodoMacros) {
   Style.Macros.push_back("SEMI ;");
   Style.Macros.push_back("STMT f();");
   Style.Macros.push_back("ID(x) x");
+  Style.Macros.push_back("ID3(x, y, z) x y z");
 
   verifyFormat("CLASS\n"
                "  a *b;\n"
@@ -12163,6 +12164,15 @@ TEST_F(FormatTest, TodoMacros) {
                "STMT\n"
                "STMT", Style);
   verifyFormat("ID({ ID(a *b); });", Style);
+
+  Style.ColumnLimit = 10;
+  EXPECT_EQ(R"(
+    
+)", format(R"(
+ID3(CLASS a*b; };, ID(a*b);, STMT STMT STMT)
+void f();
+)", Style));
+
 
   //verifyFormat("a; b; c;");
   //verifyFormat("void f() { a *b; }");
