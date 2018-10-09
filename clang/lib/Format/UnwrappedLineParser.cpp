@@ -39,6 +39,32 @@ public:
 
 namespace {
 
+LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
+                                                 StringRef Prefix = "") {
+  llvm::dbgs() << Prefix << "Line(" << Line.Level
+               << ", FSC=" << Line.FirstStartColumn << ")"
+               << (Line.InPPDirective ? " MACRO" : "") << ": ";
+  for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
+                                                    E = Line.Tokens.end();
+       I != E; ++I) {
+    llvm::dbgs() << I->Tok->Tok.getName() << "["
+                 << "T=" << I->Tok->Type << ", OC=" << I->Tok->OriginalColumn
+                 << "] ";
+  }
+  for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
+                                                    E = Line.Tokens.end();
+       I != E; ++I) {
+    const UnwrappedLineNode &Node = *I;
+    for (SmallVectorImpl<UnwrappedLine>::const_iterator
+             I = Node.Children.begin(),
+             E = Node.Children.end();
+         I != E; ++I) {
+      printDebugInfo(*I, "\nChild: ");
+    }
+  }
+  llvm::dbgs() << "\n";
+}
+
 class ScopedDeclarationState {
 public:
   ScopedDeclarationState(UnwrappedLine &Line, std::vector<bool> &Stack,
@@ -245,7 +271,8 @@ UnwrappedLineParser::UnwrappedLineParser(
     encoding::Encoding Encoding, const AdditionalKeywords &Keywords,
     unsigned FirstStartColumn, SmallVectorImpl<FormatToken *> &Tokens,
     UnwrappedLineConsumer &Callback,
-    llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator)
+    llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
+    IdentifierTable &IdentTable)
     : Line(new UnwrappedLine), MustBreakBeforeNextToken(false),
       CurrentLines(&Lines), Style(Style), Keywords(Keywords),
       CommentPragmasRegex(Style.CommentPragmas), Tokens(nullptr),
@@ -254,7 +281,7 @@ UnwrappedLineParser::UnwrappedLineParser(
                        ? IG_Rejected
                        : IG_Inited),
       IncludeGuardToken(nullptr), FirstStartColumn(FirstStartColumn),
-      M(Style.Macros, SourceMgr, Style, Encoding, Allocator), SourceMgr(SourceMgr),
+      M(Style.Macros, SourceMgr, Style, Encoding, Allocator, IdentTable), SourceMgr(SourceMgr),
       Encoding(Encoding), Allocator(Allocator) {}
 
 void UnwrappedLineParser::reset() {
@@ -298,10 +325,17 @@ void UnwrappedLineParser::parse() {
     pushToken(FormatTok);
     addUnwrappedLine();
 
-    for (const auto &Line : ExpandedLines) {
-      Callback.consumeUnwrappedLine(Line);
+    if (!ExpandedLines.empty()) {
+      adaptExpandedLineBreaks();
+      for (const auto &Line : ExpandedLines) {
+        // printDebugInfo(Line);
+        Callback.consumeUnwrappedLine(Line);
+      }
+      Callback.finishRun();
+      for (const auto &Line : ExpandedLines) {
+        advanceMacroState(Line);
+      }
     }
-    Callback.finishRun();
 
     for (SmallVectorImpl<UnwrappedLine>::iterator I = Lines.begin(),
                                                   E = Lines.end();
@@ -327,6 +361,46 @@ void UnwrappedLineParser::parse() {
     }
   } while (!PPLevelBranchIndex.empty());
 }
+
+void UnwrappedLineParser::adaptExpandedLineBreaks() {
+  std::map<FormatToken*, std::pair<int, std::list<UnwrappedLineNode>::iterator>> Calls;
+  for (int I = 0, E = ExpandedLines.size(); I != E; ++I) {
+    UnwrappedLine &Line = ExpandedLines[I];
+    if (Line.Tokens.size() < 2) continue;
+    for (auto TI = std::next(Line.Tokens.begin()), TE = Line.Tokens.end(); TI != TE; ++TI) {
+      if (!TI->Tok->MacroID) continue;
+      Calls[TI->Tok] = std::make_pair(I, TI);
+    }
+  }
+  std::map<int, llvm::SmallVector<std::list<UnwrappedLineNode>::iterator, 1>> Breaks;
+  for (const auto &Line : Lines) {
+    if (Line.Tokens.empty()) continue;
+    auto I = Calls.find(Line.Tokens.begin()->Tok);
+    if (I == Calls.end()) continue;
+    Breaks[I->second.first].push_back(I->second.second);
+  }
+  if (Breaks.empty()) return;
+  llvm::SmallVector<UnwrappedLine, 8> NewExpandedLines;
+  for (int I = 0, E = ExpandedLines.size(); I != E; ++I) {
+    NewExpandedLines.push_back(ExpandedLines[I]);
+    auto &Original = NewExpandedLines.back().Tokens;
+    auto Break = Breaks.find(I);
+    if (Break == Breaks.end()) continue;
+    auto TI = Break->second.begin();
+    auto TE = std::next(TI);
+    do {
+      // FIXME: Make sure we never use other non-default entries for ExpandedLines,
+      // specifically not the block indices.
+      NewExpandedLines.push_back(UnwrappedLine());
+      auto &Tokens = NewExpandedLines.back().Tokens;
+      Tokens.insert(Tokens.begin(), *TI, *TE);
+      TI = TE;
+      TE = std::next(TE);
+    } while (TI != Break->second.end());
+    Original.erase(*Break->second.begin(), Original.end());
+  }
+}
+
 /*
 bool UnwrappedLineParser::unexpandLine(UnwrappedLine &Line) {
   bool Unexpanded = false;
@@ -2391,35 +2465,10 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
   }
 }
 
-LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
-                                                 StringRef Prefix = "") {
-  llvm::dbgs() << Prefix << "Line(" << Line.Level
-               << ", FSC=" << Line.FirstStartColumn << ")"
-               << (Line.InPPDirective ? " MACRO" : "") << ": ";
-  for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
-                                                    E = Line.Tokens.end();
-       I != E; ++I) {
-    llvm::dbgs() << I->Tok->Tok.getName() << "["
-                 << "T=" << I->Tok->Type << ", OC=" << I->Tok->OriginalColumn
-                 << "] ";
-  }
-  for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
-                                                    E = Line.Tokens.end();
-       I != E; ++I) {
-    const UnwrappedLineNode &Node = *I;
-    for (SmallVectorImpl<UnwrappedLine>::const_iterator
-             I = Node.Children.begin(),
-             E = Node.Children.end();
-         I != E; ++I) {
-      printDebugInfo(*I, "\nChild: ");
-    }
-  }
-  llvm::dbgs() << "\n";
-}
-
 bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *Tok) {
   for (const auto &N : Line.Tokens) {
-    if (N.Tok == Tok) return true;
+    if (N.Tok == Tok || (N.Tok->is(tok::eof) && Tok->is(tok::eof)))
+      return true;
     for (const UnwrappedLine &Child : N.Children) {
       if (containsToken(Child, Tok)) return true;
     }
@@ -2427,22 +2476,97 @@ bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *
   return false;
 }
 
+bool UnwrappedLineParser::containsExpansion(const UnwrappedLine &Line) {
+  for (const auto &N : Line.Tokens) {
+    if (N.Tok->ExpandedFrom) return true;
+    for (const UnwrappedLine &Child : N.Children) {
+      if (containsExpansion(Child)) return true;
+    }
+  }
+  return false;
+}
+
+template <typename Iterator>
+void UnwrappedLineParser::unexpandRange(UnwrappedLine &Line, Iterator I,
+                                        Iterator E, bool EraseExpanded, llvm::DenseSet<FormatToken*> &Expanded) {
+  llvm::errs() << "UR: " << I->Tok->TokenText << " -> " << (E == Line.Tokens.end() ? "END" : E->Tok->TokenText) << "\n";
+  while (I != E) {
+    if (I->Tok->ExpandedFrom) {
+      if (I->Tok->StartOfExpansion && Unexpanded.find(I->Tok->ExpandedFrom) != Unexpanded.end()) {
+        auto &Tokens = Unexpanded[I->Tok->ExpandedFrom]->Tokens;
+        auto SI = Line.Tokens.insert(I, Tokens.begin(), Tokens.end());
+        Unexpanded.erase(I->Tok->ExpandedFrom);
+        unexpandRange(Line, SI, I, /*EraseExpanded*/false, Expanded); 
+        Expanded.insert(I->Tok->ExpandedFrom);
+        I = Line.Tokens.erase(I);
+        continue;
+      }
+      if (EraseExpanded || Expanded.find(I->Tok->ExpandedFrom) != Expanded.end()) {
+        I = Line.Tokens.erase(I);
+        continue;
+      }
+    }
+    for (UnwrappedLine &Child : I->Children) {
+      unexpandRange(Child, Child.Tokens.begin(), Child.Tokens.end(), EraseExpanded, Expanded);
+    }
+    ++I;
+  }
+}
+
+void UnwrappedLineParser::unexpand(UnwrappedLine &Line) {
+  auto I = Line.Tokens.begin();
+  auto E = Line.Tokens.end();
+  llvm::DenseSet<FormatToken*> Expanded;
+  unexpandRange(Line, I, E, /*EraseExpanded=*/true, Expanded);
+}
+
+
+void UnwrappedLineParser::advanceMacroState(const UnwrappedLine &Line) {
+  return;
+}
+
 void UnwrappedLineParser::addUnwrappedLine() {
   if (Line->Tokens.empty())
     return;
+  /*
+  if (Expanding) {
+    llvm::errs() << "Expanding " << ExpandUntil->Tok.getName() << "\n";
+    bool Contains = containsToken(*Line, ExpandUntil);
+    // FIXME: Make this break and see what to do in that situation.
+    assert(!Contains || Line->Tokens.front().Tok->is(tok::eof) ||
+           Line->Tokens.front().Tok == ExpandUntil);
+    if (!Contains) {
+      ExpandedLines.push_back(std::move(*Line));
+      ++ExpandedLinesAdded;
+    } else {
+      llvm::errs() << "Finished! \n";
+      //CurrentLines->push_back(std::move(*Unexpanded));
+      CurrentLines->push_back(std::move(*Line));
+      Expanding = false;
+      ExpandUntil = nullptr;
+      ExpandedLinesAdded = 0;
+    }
+  } else {
+    */
   LLVM_DEBUG({
     if (CurrentLines == &Lines)
       printDebugInfo(*Line);
   });
-  if (Expanding) {
-    ExpandedLines.push_back(std::move(*Line));
-    if (containsToken(*Line, ExpandUntil)) {
-      Expanding = false;
-      ExpandUntil = nullptr;
+  if (containsExpansion(*Line)) {
+    UnwrappedLine Unexpanded = *Line;
+    unexpand(Unexpanded);
+    if (!Unexpanded.Tokens.empty()) {
+      LLVM_DEBUG({
+        if (CurrentLines == &Lines)
+          printDebugInfo(Unexpanded);
+      });
+      CurrentLines->push_back(std::move(Unexpanded));
     }
+    ExpandedLines.push_back(std::move(*Line));
   } else {
     CurrentLines->push_back(std::move(*Line));
   }
+  //}
   Line->Tokens.clear();
   Line->MatchingOpeningBlockLineIndex = UnwrappedLine::kInvalidIndex;
   Line->FirstStartColumn = 0;
@@ -2708,6 +2832,7 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
 // TODO!!!
 
     if (FormatTok->is(tok::identifier) && M.Defined(FormatTok->TokenText)) {
+      /*
       if (ParsingMacroLine) {
         ++ToExpand;
       } else {
@@ -2720,6 +2845,8 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
           Line.reset(new UnwrappedLine(*PreParse));
           parseStructuralElement();
           addUnwrappedLine();
+          //Unexpanded = std::move(Line);
+          //llvm::errs() << "Unexpanded: " << Unexpanded->Tokens.size() << "\n";
           // FIXME: push line if not empty?
           Line = std::move(PreParse);
           ParsingMacroLine = false;
@@ -2729,35 +2856,37 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
           FormatTok = Tokens->setPosition(StoredPosition);
         }
         // FIXME: reset the rest of the state?
+        */
 
-        std::string ID = FormatTok->TokenText;
-        auto PreCall = std::move(Line);
-        Line.reset(new UnwrappedLine);
-        auto Args = parseMacroCall();
-        Line = std::move(PreCall);
+      FormatToken *ID = FormatTok;
+      auto PreCall = std::move(Line);
+      Line.reset(new UnwrappedLine);
+      auto Args = parseMacroCall();
+      Unexpanded[Line->Tokens.front().Tok] = std::move(Line);
+      Line = std::move(PreCall);
 
-        LLVM_DEBUG({
-          llvm::dbgs() << "Call: " << ID << "(";
-          for (const auto &Arg : Args) {
-            for (const auto &T : Arg)
-              llvm::dbgs() << T->TokenText << " ";
-          }
-          llvm::dbgs() << ")\n";
-        });
-
-        SmallVector<FormatToken *, 8> New = M.Expand2(ID, Args);
-        LLVM_DEBUG({
-          llvm::dbgs() << "Expanded: ";
-          for (const auto &T : New) {
+      LLVM_DEBUG({
+        llvm::dbgs() << "Call: " << ID->TokenText << "(";
+        for (const auto &Arg : Args) {
+          for (const auto &T : Arg)
             llvm::dbgs() << T->TokenText << " ";
-          }
-          llvm::dbgs() << "\n";
-        });
-        if (!New.empty()) {
-          Tokens->prependTokens(New);
-          FormatTok = Tokens->getNextToken();
         }
+        llvm::dbgs() << ")\n";
+      });
+
+      SmallVector<FormatToken *, 8> New = M.Expand2(ID, Args);
+      LLVM_DEBUG({
+        llvm::dbgs() << "Expanded: ";
+        for (const auto &T : New) {
+          llvm::dbgs() << T->TokenText << " ";
+        }
+        llvm::dbgs() << "\n";
+      });
+      if (!New.empty()) {
+        Tokens->prependTokens(New);
+        FormatTok = Tokens->getNextToken();
       }
+      //}
     }
 
     if (!FormatTok->Tok.is(tok::comment)) {
@@ -2781,8 +2910,8 @@ llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::pa
   // TODO: put into different line
   nextToken();
   if (FormatTok->isNot(tok::l_paren)) {
-    llvm::errs() << FormatTok->Tok.getName() << "\n";
-    llvm::errs() << "huh?\n";
+    //llvm::errs() << FormatTok->Tok.getName() << "\n";
+    //llvm::errs() << "huh?\n";
     return Args;
   }
   nextToken();

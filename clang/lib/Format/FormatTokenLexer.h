@@ -43,7 +43,8 @@ class FormatTokenLexer {
 public:
   FormatTokenLexer(const SourceManager &SourceMgr, FileID ID, unsigned Column,
                    const FormatStyle &Style, encoding::Encoding Encoding,
-                   llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator);
+                   llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
+                   IdentifierTable &IdentTable);
 
   void setPreprocessor(Preprocessor *PP) {
     this->PP = PP;
@@ -104,7 +105,7 @@ private:
   const SourceManager &SourceMgr;
   FileID ID;
   const FormatStyle &Style;
-  IdentifierTable IdentTable;
+  IdentifierTable &IdentTable;
   AdditionalKeywords Keywords;
   encoding::Encoding Encoding;
   // Index (in 'Tokens') of the last token that starts a new line.

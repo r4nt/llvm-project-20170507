@@ -661,7 +661,12 @@ private:
 
 static void markFinalized(FormatToken *Tok) {
   for (; Tok; Tok = Tok->Next) {
-    Tok->Finalized = true;
+    if (Tok->Macro == MS_Expansion) {
+      Tok->Macro = MS_Call;
+      Tok->SpacesRequiredBefore = 0;
+    } else {
+      Tok->Finalized = true;
+    }
     for (AnnotatedLine *Child : Tok->Children)
       markFinalized(Child->First);
   }

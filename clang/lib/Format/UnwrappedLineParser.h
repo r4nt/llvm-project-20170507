@@ -21,6 +21,7 @@
 #include "Macros.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Format/Format.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Regex.h"
 #include <list>
 #include <stack>
@@ -83,7 +84,8 @@ public:
                       unsigned FirstStartColumn,
                       SmallVectorImpl<FormatToken *> &Tokens,
                       UnwrappedLineConsumer &Callback,
-                      llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator);
+                      llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
+                      IdentifierTable &IdentTable);
 
   void parse();
 
@@ -176,6 +178,12 @@ private:
 
   //bool unexpandLine(UnwrappedLine &Line);
   bool containsToken(const UnwrappedLine &Line, FormatToken *Tok);
+  bool containsExpansion(const UnwrappedLine &Line);
+  void unexpand(UnwrappedLine &Line);
+  template <typename Iterator>
+  void unexpandRange(UnwrappedLine &Line, Iterator begin, Iterator end, bool EraseExpanded, llvm::DenseSet<FormatToken*> &Expanded);
+  void advanceMacroState(const UnwrappedLine &Line);
+  void adaptExpandedLineBreaks();
 
   // Compute hash of the current preprocessor branch.
   // This is used to identify the different branches, and thus track if block
@@ -196,6 +204,9 @@ private:
   bool Expanding = false;
   FormatToken *ExpandUntil = nullptr;
   SmallVector<UnwrappedLine, 8> ExpandedLines;
+  int ExpandedLinesAdded = 0;
+  std::map<FormatToken *, std::unique_ptr<UnwrappedLine>> Unexpanded;
+  //std::unique_ptr<UnwrappedLine> Unexpanded;
 
   // Comments are sorted into unwrapped lines by whether they are in the same
   // line as the previous token, or not. If not, they belong to the next token.

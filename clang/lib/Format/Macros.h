@@ -27,6 +27,7 @@
 namespace llvm { class MemoryBuffer; }
 
 namespace clang {
+class IdentifierTable;
 class SourceManager;
 
 namespace format {
@@ -38,13 +39,14 @@ public:
   Macros(const std::vector<std::string> &Macros,
          clang::SourceManager &SourceMgr, const FormatStyle &Style,
          encoding::Encoding encoding,
-         llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator);
+         llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
+         IdentifierTable &IdentTable);
   ~Macros();
   bool Defined(llvm::StringRef Name);
   //std::string Expand(llvm::StringRef Code);
 
   llvm::SmallVector<FormatToken *, 8>
-  Expand2(llvm::StringRef Name,
+  Expand2(FormatToken *ID,
          llvm::ArrayRef<llvm::SmallVector<FormatToken *, 8>> Args);
   //llvm::ArrayRef<FormatToken*> Expand(llvm::ArrayRef<FormatToken*> Call);
 
@@ -60,6 +62,7 @@ private:
   const FormatStyle &Style;
   encoding::Encoding Encoding;
   llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator;
+  IdentifierTable &IdentTable;
   std::vector<std::unique_ptr<llvm::MemoryBuffer>> Buffers;
 
   llvm::StringMap<Definition> Definitions;

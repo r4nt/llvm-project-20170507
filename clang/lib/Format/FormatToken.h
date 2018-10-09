@@ -115,6 +115,8 @@ enum ParameterPackingKind { PPK_BinPacked, PPK_OnePerLine, PPK_Inconclusive };
 
 enum FormatDecision { FD_Unformatted, FD_Continue, FD_Break };
 
+enum MacroState { MS_None, MS_Expansion, MS_Call };
+
 class TokenRole;
 class AnnotatedLine;
 
@@ -305,7 +307,14 @@ struct FormatToken {
   /// changes.
   bool Finalized = false;
 
-  bool Annotated = false;
+  bool MacroID = false;
+
+  //bool Annotated = false;
+
+  MacroState Macro = MS_None;
+
+  FormatToken *ExpandedFrom = nullptr;
+  bool StartOfExpansion = false;
 
   bool is(tok::TokenKind Kind) const { return Tok.is(Kind); }
   bool is(TokenType TT) const { return Type == TT; }
@@ -533,6 +542,11 @@ struct FormatToken {
       NamespaceTok = NamespaceTok->getNextNonComment();
     return NamespaceTok && NamespaceTok->is(tok::kw_namespace) ? NamespaceTok
                                                                : nullptr;
+  }
+
+  void setType(TokenType T) {
+    if (Macro == MS_Call) return;
+    Type = T;
   }
 
   void copyInto(FormatToken &Tok) {

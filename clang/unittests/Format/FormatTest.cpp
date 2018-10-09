@@ -12147,22 +12147,22 @@ TEST_F(FormatTest, MergeLessLessAtEnd) {
 
 TEST_F(FormatTest, TodoMacros) {
   FormatStyle Style = getLLVMStyle();
-  //Style.Macros.push_back("CLASS class C {");
-  //Style.Macros.push_back("SEMI ;");
-  //Style.Macros.push_back("STMT f();");
+  Style.Macros.push_back("CLASS class C {");
+  Style.Macros.push_back("SEMI ;");
+  Style.Macros.push_back("STMT f();");
   Style.Macros.push_back("ID(x) x");
 
-  verifyFormat("ID({ ID(a*b); });", Style);
-  //verifyFormat("CLASS\n"
-  //             "  a *b;\n"
-  //             "};", Style);
-  //verifyFormat("a SEMI\n"
-  //             "a SEMI\n"
-  //             "a SEMI", Style);
-  //verifyFormat("STMT\n"
-  //             "STMT\n"
-  //             "STMT", Style);
-  //verifyFormat("void f() { ID(a *b); }", Style);
+  verifyFormat("CLASS\n"
+               "  a *b;\n"
+               "};", Style);
+  verifyFormat("a SEMI\n"
+               "a SEMI\n"
+               "a SEMI", Style);
+  verifyFormat("void f() { ID(a *b); }", Style);
+  verifyFormat("STMT\n"
+               "STMT\n"
+               "STMT", Style);
+  verifyFormat("ID({ ID(a *b); });", Style);
 
   //verifyFormat("a; b; c;");
   //verifyFormat("void f() { a *b; }");

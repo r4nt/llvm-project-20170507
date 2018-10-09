@@ -63,8 +63,8 @@ struct Macros::Definition {
 class Macros::DefinitionParser {
 public:
   DefinitionParser(ArrayRef<FormatToken *> Tokens) : Tokens(Tokens) {
-    for (const auto& T : Tokens) llvm::errs() << T->Tok.getName() << " ";
-      llvm::errs() << "\n";
+    //for (const auto& T : Tokens) llvm::errs() << T->Tok.getName() << " ";
+      //llvm::errs() << "\n";
     assert(!Tokens.empty());
     Tok = Tokens[0];
   }
@@ -77,7 +77,7 @@ public:
       parseParams();
     }  
     parseExpansion();
-    llvm::errs() << Def.Name << " / " << Def.Params.size() << " / " << Def.Tokens.size() << "\n";
+    //llvm::errs() << Def.Name << " / " << Def.Params.size() << " / " << Def.Tokens.size() << "\n";
     return Def;
   }
 
@@ -86,7 +86,7 @@ public:
     nextToken();
     while (Tok->is(tok::identifier)) {
       Def.Params.push_back(Tok);
-      llvm::errs() << "PUSHING\n";
+      //llvm::errs() << "PUSHING\n";
       nextToken();
       if (!Tok->is(tok::comma)) break;
       nextToken();
@@ -107,7 +107,7 @@ public:
     if (I + 1 < Tokens.size())
       ++I;
     Tok = Tokens[I];
-    llvm::errs() << Tok->Tok.getName() << "\n";
+    //llvm::errs() << Tok->Tok.getName() << "\n";
     Tok->Finalized = true;
   }
 
@@ -122,9 +122,10 @@ private:
 Macros::Macros(const std::vector<std::string> &Macros,
                clang::SourceManager &SourceMgr, const FormatStyle &Style,
                encoding::Encoding Encoding, 
-               llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator)
+               llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
+               IdentifierTable &IdentTable)
     : PP(llvm::make_unique<PPState>(SourceMgr, Style)), Style(Style),
-      Encoding(Encoding), Allocator(Allocator) {
+      Encoding(Encoding), Allocator(Allocator), IdentTable(IdentTable) {
   parseDefinitions(Macros);
 }
 
@@ -137,7 +138,7 @@ void Macros::parseDefinitions(const std::vector<std::string> &Macros) {
 */
     Buffers.push_back(llvm::MemoryBuffer::getMemBufferCopy(Macro, "<scratch space>"));
     clang::FileID FID = PP->SourceMgr.createFileID(SourceManager::Unowned, Buffers.back().get());
-    FormatTokenLexer Lex(PP->SourceMgr, FID, 0, Style, Encoding, Allocator);
+    FormatTokenLexer Lex(PP->SourceMgr, FID, 0, Style, Encoding, Allocator, IdentTable);
     DefinitionParser Parser(Lex.lex());
     auto Definition = Parser.parse();
     Definitions[Definition.Name] = Definition;
@@ -175,24 +176,31 @@ std::string Macros::Expand(llvm::StringRef Code) {
 }
 */
 
-llvm::SmallVector<FormatToken*, 8> Macros::Expand2(llvm::StringRef Name, llvm::ArrayRef<llvm::SmallVector<FormatToken *, 8>> Args) {
-  llvm::errs() << "Name: " << Name << "\n";
+llvm::SmallVector<FormatToken*, 8> Macros::Expand2(FormatToken *ID, llvm::ArrayRef<llvm::SmallVector<FormatToken *, 8>> Args) {
+  /*llvm::errs() << "Name: " << Name << "\n";
   llvm::errs() << "Args: " << Args.size() << "\n";
   llvm::errs() << "Parm: " << Definitions[Name].Params.size() << "\n";
-  llvm::errs() << "Expa: " << Definitions[Name].Tokens.size() << "\n";
+  llvm::errs() << "Expa: " << Definitions[Name].Tokens.size() << "\n";*/
   SmallVector<FormatToken*, 8> Result;
-  const Definition &Def = Definitions[Name];
+  const Definition &Def = Definitions[ID->TokenText];
   llvm::StringMap<int> ArgMap;
   for (int I = 0, E = Def.Params.size(); I != E; ++I) {
     ArgMap[Def.Params[I]->TokenText] = I;
   }
-  for (FormatToken *Tok : Definitions[Name].Tokens) {
+  bool First = true;
+  for (FormatToken *Tok : Definitions[ID->TokenText].Tokens) {
     if (Tok->is(tok::identifier)) {
       auto I = ArgMap.find(Tok->TokenText);
       if (I != ArgMap.end()) {
         if (I->getValue() < Args.size()) {
           for (const auto &Tok : Args[I->getValue()]) {
+            Tok->Macro = MS_Expansion;
+            if (Tok->ExpandedFrom == nullptr) {
+              Tok->ExpandedFrom = ID;
+            }
             Result.push_back(Tok);
+            if (First) Tok->StartOfExpansion = true;
+            First = false;
           }
         }
         continue;
@@ -200,7 +208,10 @@ llvm::SmallVector<FormatToken*, 8> Macros::Expand2(llvm::StringRef Name, llvm::A
     }
     FormatToken *New = new (Allocator.Allocate()) FormatToken;
     Tok->copyInto(*New);
+    New->ExpandedFrom = ID;
     Result.push_back(New);
+    if (First) New->StartOfExpansion = true;
+    First = false;
   }
   return Result;
 }
