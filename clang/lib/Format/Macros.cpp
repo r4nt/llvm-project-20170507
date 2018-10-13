@@ -195,9 +195,12 @@ llvm::SmallVector<FormatToken*, 8> Macros::Expand2(FormatToken *ID, llvm::ArrayR
         if (I->getValue() < Args.size()) {
           for (const auto &Tok : Args[I->getValue()]) {
             Tok->Macro = MS_Expansion;
+            Tok->ExpandedFrom.push_back(ID);
+            /*
             if (Tok->ExpandedFrom == nullptr) {
               Tok->ExpandedFrom = ID;
             }
+            */
             Result.push_back(Tok);
             if (First) Tok->StartOfExpansion = true;
             First = false;
@@ -208,7 +211,8 @@ llvm::SmallVector<FormatToken*, 8> Macros::Expand2(FormatToken *ID, llvm::ArrayR
     }
     FormatToken *New = new (Allocator.Allocate()) FormatToken;
     Tok->copyInto(*New);
-    New->ExpandedFrom = ID;
+    //New->ExpandedFrom = ID;
+    New->ExpandedFrom.push_back(ID);
     Result.push_back(New);
     if (First) New->StartOfExpansion = true;
     First = false;

@@ -179,9 +179,10 @@ private:
   //bool unexpandLine(UnwrappedLine &Line);
   bool containsToken(const UnwrappedLine &Line, FormatToken *Tok);
   bool containsExpansion(const UnwrappedLine &Line);
+  void popExpandedFrom(const UnwrappedLine &Line, FormatToken *From);
   void unexpand(UnwrappedLine &Line);
   template <typename Iterator>
-  void unexpandRange(UnwrappedLine &Line, Iterator begin, Iterator end, bool EraseExpanded, llvm::DenseSet<FormatToken*> &Expanded);
+  void unexpandRange(UnwrappedLine &Line, Iterator begin, Iterator end, bool EraseExpanded, std::string Prefix);
   void advanceMacroState(const UnwrappedLine &Line);
   void adaptExpandedLineBreaks();
 
@@ -199,13 +200,16 @@ private:
   //std::unique_ptr<UnwrappedLine> ExpandedLine;
   //std::deque<clang::SourceLocation> ToExpand;
   //int LineStartToken = 0;
-  bool ParsingMacroLine = false;
-  int ToExpand = 0;
-  bool Expanding = false;
-  FormatToken *ExpandUntil = nullptr;
+  //bool ParsingMacroLine = false;
+  //int ToExpand = 0;
+  //bool Expanding = false;
+  //FormatToken *ExpandUntil = nullptr;
   SmallVector<UnwrappedLine, 8> ExpandedLines;
-  int ExpandedLinesAdded = 0;
+  //int ExpandedLinesAdded = 0;
   std::map<FormatToken *, std::unique_ptr<UnwrappedLine>> Unexpanded;
+  //bool ExpandMacros = true;
+  bool InExpansion = false;
+llvm::SmallDenseSet<FormatToken *> ExpandedTokens;
   //std::unique_ptr<UnwrappedLine> Unexpanded;
 
   // Comments are sorted into unwrapped lines by whether they are in the same

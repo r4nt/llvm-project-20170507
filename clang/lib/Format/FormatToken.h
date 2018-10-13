@@ -313,7 +313,8 @@ struct FormatToken {
 
   MacroState Macro = MS_None;
 
-  FormatToken *ExpandedFrom = nullptr;
+  llvm::SmallVector<FormatToken*, 1> ExpandedFrom;
+  //FormatToken *ExpandedFrom = nullptr;
   bool StartOfExpansion = false;
 
   bool is(tok::TokenKind Kind) const { return Tok.is(Kind); }

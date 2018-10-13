@@ -1065,6 +1065,7 @@ UnwrappedLineFormatter::format(const SmallVectorImpl<AnnotatedLine *> &Lines,
     // We cannot format this line; if the reason is that the line had a
     // parsing error, remember that.
     if (ShouldFormat && TheLine.Type == LT_Invalid && Status) {
+      llvm::errs() << "CANNOT FORMAT!!!\n";
       Status->FormatComplete = false;
       Status->Line =
           SourceMgr.getSpellingLineNumber(TheLine.First->Tok.getLocation());

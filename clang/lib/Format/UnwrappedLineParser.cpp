@@ -326,9 +326,10 @@ void UnwrappedLineParser::parse() {
     addUnwrappedLine();
 
     if (!ExpandedLines.empty()) {
+llvm::errs() << "Expanded\n";
       adaptExpandedLineBreaks();
       for (const auto &Line : ExpandedLines) {
-        // printDebugInfo(Line);
+        printDebugInfo(Line);
         Callback.consumeUnwrappedLine(Line);
       }
       Callback.finishRun();
@@ -337,6 +338,7 @@ void UnwrappedLineParser::parse() {
       }
     }
 
+llvm::errs() << "Unexpanded\n";
     for (SmallVectorImpl<UnwrappedLine>::iterator I = Lines.begin(),
                                                   E = Lines.end();
          I != E; ++I) {
@@ -344,6 +346,7 @@ void UnwrappedLineParser::parse() {
       //if (unexpandLine(Unexpanded)) {
       //  Callback.consumeUnwrappedLine(Unexpanded);
       //}
+printDebugInfo(*I);
       Callback.consumeUnwrappedLine(*I);
       // todo2
     }
@@ -2465,6 +2468,18 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
   }
 }
 
+void UnwrappedLineParser::popExpandedFrom(const UnwrappedLine &Line, FormatToken *From) {
+  for (const auto &N : Line.Tokens) {
+    assert(N.Tok->ExpandedFrom.empty() || N.Tok->ExpandedFrom.back() == From);
+    if (!N.Tok->ExpandedFrom.empty())
+      N.Tok->ExpandedFrom.pop_back();
+    for (const UnwrappedLine &Child : N.Children) {
+      popExpandedFrom(Child, From);
+    }
+  }
+  
+}
+
 bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *Tok) {
   for (const auto &N : Line.Tokens) {
     if (N.Tok == Tok || (N.Tok->is(tok::eof) && Tok->is(tok::eof)))
@@ -2478,7 +2493,7 @@ bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *
 
 bool UnwrappedLineParser::containsExpansion(const UnwrappedLine &Line) {
   for (const auto &N : Line.Tokens) {
-    if (N.Tok->ExpandedFrom) return true;
+    if (N.Tok->Macro == MS_Expansion) return true;
     for (const UnwrappedLine &Child : N.Children) {
       if (containsExpansion(Child)) return true;
     }
@@ -2488,36 +2503,62 @@ bool UnwrappedLineParser::containsExpansion(const UnwrappedLine &Line) {
 
 template <typename Iterator>
 void UnwrappedLineParser::unexpandRange(UnwrappedLine &Line, Iterator I,
-                                        Iterator E, bool EraseExpanded, llvm::DenseSet<FormatToken*> &Expanded) {
-  llvm::errs() << "UR: " << I->Tok->TokenText << " -> " << (E == Line.Tokens.end() ? "END" : E->Tok->TokenText) << "\n";
+                                        Iterator E, bool EraseExpanded, std::string Prefix) {
+                                          llvm::errs() << "\n";
+  llvm::errs() << Prefix << "UR: " << I->Tok->TokenText << " -> " << (E == Line.Tokens.end() ? "END" : E->Tok->TokenText) << "\n";
+  llvm::errs() << Prefix;
   while (I != E) {
-    if (I->Tok->ExpandedFrom) {
-      if (I->Tok->StartOfExpansion && Unexpanded.find(I->Tok->ExpandedFrom) != Unexpanded.end()) {
-        auto &Tokens = Unexpanded[I->Tok->ExpandedFrom]->Tokens;
+    llvm::errs() << I->Tok->TokenText;
+    if (!I->Tok->ExpandedFrom.empty()) {
+      llvm::errs() << ".";
+      if (I->Tok->StartOfExpansion && Unexpanded.find(I->Tok->ExpandedFrom.back()) != Unexpanded.end()) {
+        llvm::errs() << "x ";
+        FormatToken *From = I->Tok->ExpandedFrom.back();
+        auto &Tokens = Unexpanded[From]->Tokens;
+        printDebugInfo(*Unexpanded[From]);
+        popExpandedFrom(*Unexpanded[From], From);
         auto SI = Line.Tokens.insert(I, Tokens.begin(), Tokens.end());
-        Unexpanded.erase(I->Tok->ExpandedFrom);
-        unexpandRange(Line, SI, I, /*EraseExpanded*/false, Expanded); 
-        Expanded.insert(I->Tok->ExpandedFrom);
+        Unexpanded.erase(From);
+        unexpandRange(Line, SI, I, /*EraseExpanded*/false, Prefix + "-"); 
+        //I->Tok->ExpandedFrom.pop_back();
+        I = Line.Tokens.erase(I);
+        llvm::errs() << Prefix << "  ";
+        continue;
+      }
+      //if (EraseExpanded || Expanded.find(I->Tok->ExpandedFrom.front()) != Expanded.end()) {
+      assert(ExpandedTokens.find(I->Tok) == ExpandedTokens.end());
+      llvm::errs() << "? ";
+      I = Line.Tokens.erase(I);
+      continue;
+    } else {
+      if (ExpandedTokens.find(I->Tok) != ExpandedTokens.end()) {
+        llvm::errs() << "* ";
         I = Line.Tokens.erase(I);
         continue;
       }
-      if (EraseExpanded || Expanded.find(I->Tok->ExpandedFrom) != Expanded.end()) {
-        I = Line.Tokens.erase(I);
-        continue;
-      }
+      ExpandedTokens.insert(I->Tok);
     }
+    llvm::errs() << " ";
     for (UnwrappedLine &Child : I->Children) {
-      unexpandRange(Child, Child.Tokens.begin(), Child.Tokens.end(), EraseExpanded, Expanded);
+      unexpandRange(Child, Child.Tokens.begin(), Child.Tokens.end(), EraseExpanded, Prefix + "_");
+      llvm::errs() << Prefix << "  ";
     }
     ++I;
   }
+  llvm::errs() << "\n";
 }
 
 void UnwrappedLineParser::unexpand(UnwrappedLine &Line) {
+  llvm::errs() << "\nUnexpanding line ---------------------\n";
   auto I = Line.Tokens.begin();
   auto E = Line.Tokens.end();
-  llvm::DenseSet<FormatToken*> Expanded;
-  unexpandRange(Line, I, E, /*EraseExpanded=*/true, Expanded);
+  llvm::errs() << "Before:\n";
+  printDebugInfo(Line);
+  //llvm::DenseSet<FormatToken*> Expanded;
+  unexpandRange(Line, I, E, /*EraseExpanded=*/true, "");
+  llvm::errs() << "After:\n";
+  printDebugInfo(Line);
+  llvm::errs() << "\n--------------------------------------\n\n";
 }
 
 
@@ -2552,16 +2593,16 @@ void UnwrappedLineParser::addUnwrappedLine() {
     if (CurrentLines == &Lines)
       printDebugInfo(*Line);
   });
-  if (containsExpansion(*Line)) {
-    UnwrappedLine Unexpanded = *Line;
-    unexpand(Unexpanded);
-    if (!Unexpanded.Tokens.empty()) {
-      LLVM_DEBUG({
-        if (CurrentLines == &Lines)
-          printDebugInfo(Unexpanded);
-      });
-      CurrentLines->push_back(std::move(Unexpanded));
-    }
+  if (!InExpansion && containsExpansion(*Line)) {
+      UnwrappedLine Unexpanded = *Line;
+      unexpand(Unexpanded);
+      if (!Unexpanded.Tokens.empty()) {
+        LLVM_DEBUG({
+          if (CurrentLines == &Lines)
+            printDebugInfo(Unexpanded);
+        });
+        CurrentLines->push_back(std::move(Unexpanded));
+      }
     ExpandedLines.push_back(std::move(*Line));
   } else {
     CurrentLines->push_back(std::move(*Line));
@@ -2860,8 +2901,12 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
 
       FormatToken *ID = FormatTok;
       auto PreCall = std::move(Line);
+
       Line.reset(new UnwrappedLine);
+      bool OldInExpansion = InExpansion;
+      InExpansion = true;
       auto Args = parseMacroCall();
+      InExpansion = OldInExpansion;
       Unexpanded[Line->Tokens.front().Tok] = std::move(Line);
       Line = std::move(PreCall);
 
@@ -2903,6 +2948,16 @@ void UnwrappedLineParser::readToken(int LevelDifference) {
   Comments.clear();
 }
 
+template<typename Iterator>
+void pushTokens(Iterator Begin, Iterator End, llvm::SmallVectorImpl<FormatToken*> &Into) {
+  for (auto I = Begin; I != End; ++I) {
+    Into.push_back(I->Tok);
+    for (const auto& Child : I->Children) {
+      pushTokens(Child.Tokens.begin(), Child.Tokens.end(), Into);
+    }
+  }
+}
+
 //FIXME!! Change to void.
 llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::parseMacroCall() {
   llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> Args;
@@ -2936,16 +2991,14 @@ llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::pa
       //}
       //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
       Args.push_back({});
-      for (auto I = std::next(LastEnd), E = Line->Tokens.end(); I != E; ++I)
-        Args.back().push_back(I->Tok);
+      pushTokens(std::next(LastEnd), Line->Tokens.end(), Args.back());
       nextToken();
       return Args;
     }
     case tok::comma: {
       //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
       Args.push_back({});
-      for (auto I = std::next(LastEnd), E = Line->Tokens.end(); I != E; ++I)
-        Args.back().push_back(I->Tok);
+      pushTokens(std::next(LastEnd), Line->Tokens.end(), Args.back());
       nextToken();
       LastEnd = std::prev(Line->Tokens.end());
       break;
