@@ -115,7 +115,7 @@ enum ParameterPackingKind { PPK_BinPacked, PPK_OnePerLine, PPK_Inconclusive };
 
 enum FormatDecision { FD_Unformatted, FD_Continue, FD_Break };
 
-enum MacroState { MS_None, MS_Expansion, MS_Call };
+enum MacroState { MS_None, MS_Expansion, MS_Call, MS_Hidden };
 
 class TokenRole;
 class AnnotatedLine;

@@ -75,6 +75,7 @@ public:
 };
 
 class FormatTokenSource;
+class Unexpander;
 
 class UnwrappedLineParser {
 public:
@@ -86,6 +87,7 @@ public:
                       UnwrappedLineConsumer &Callback,
                       llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
                       IdentifierTable &IdentTable);
+  ~UnwrappedLineParser();
 
   void parse();
 
@@ -210,6 +212,7 @@ private:
   //bool ExpandMacros = true;
   bool InExpansion = false;
 llvm::SmallDenseSet<FormatToken *> ExpandedTokens;
+  std::unique_ptr<Unexpander> Unexpand;
   //std::unique_ptr<UnwrappedLine> Unexpanded;
 
   // Comments are sorted into unwrapped lines by whether they are in the same

@@ -284,6 +284,8 @@ UnwrappedLineParser::UnwrappedLineParser(
       M(Style.Macros, SourceMgr, Style, Encoding, Allocator, IdentTable), SourceMgr(SourceMgr),
       Encoding(Encoding), Allocator(Allocator) {}
 
+UnwrappedLineParser::~UnwrappedLineParser() {}
+
 void UnwrappedLineParser::reset() {
   PPBranchLevel = -1;
   IncludeGuard = Style.IndentPPDirectives == FormatStyle::PPDIS_None
@@ -326,10 +328,10 @@ void UnwrappedLineParser::parse() {
     addUnwrappedLine();
 
     if (!ExpandedLines.empty()) {
-llvm::errs() << "Expanded\n";
+//llvm::errs() << "Expanded\n";
       adaptExpandedLineBreaks();
       for (const auto &Line : ExpandedLines) {
-        printDebugInfo(Line);
+  //      printDebugInfo(Line);
         Callback.consumeUnwrappedLine(Line);
       }
       Callback.finishRun();
@@ -2493,7 +2495,8 @@ bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *
 
 bool UnwrappedLineParser::containsExpansion(const UnwrappedLine &Line) {
   for (const auto &N : Line.Tokens) {
-    if (N.Tok->Macro == MS_Expansion) return true;
+    if (N.Tok->Macro != MS_None) return true;
+    //if (!N.Tok->ExpandedFrom.empty()) return true;
     for (const UnwrappedLine &Child : N.Children) {
       if (containsExpansion(Child)) return true;
     }
@@ -2504,61 +2507,167 @@ bool UnwrappedLineParser::containsExpansion(const UnwrappedLine &Line) {
 template <typename Iterator>
 void UnwrappedLineParser::unexpandRange(UnwrappedLine &Line, Iterator I,
                                         Iterator E, bool EraseExpanded, std::string Prefix) {
-                                          llvm::errs() << "\n";
-  llvm::errs() << Prefix << "UR: " << I->Tok->TokenText << " -> " << (E == Line.Tokens.end() ? "END" : E->Tok->TokenText) << "\n";
-  llvm::errs() << Prefix;
+  // llvm::errs() << "\n";
+  //llvm::errs() << Prefix << "UR: " << I->Tok->TokenText << " -> " << (E == Line.Tokens.end() ? "END" : E->Tok->TokenText) << "\n";
+  //llvm::errs() << Prefix;
   while (I != E) {
-    llvm::errs() << I->Tok->TokenText;
+    //llvm::errs() << I->Tok->TokenText;
     if (!I->Tok->ExpandedFrom.empty()) {
-      llvm::errs() << ".";
+      //llvm::errs() << ".";
       if (I->Tok->StartOfExpansion && Unexpanded.find(I->Tok->ExpandedFrom.back()) != Unexpanded.end()) {
-        llvm::errs() << "x ";
+        //llvm::errs() << "x ";
         FormatToken *From = I->Tok->ExpandedFrom.back();
         auto &Tokens = Unexpanded[From]->Tokens;
-        printDebugInfo(*Unexpanded[From]);
+        //printDebugInfo(*Unexpanded[From]);
         popExpandedFrom(*Unexpanded[From], From);
         auto SI = Line.Tokens.insert(I, Tokens.begin(), Tokens.end());
         Unexpanded.erase(From);
         unexpandRange(Line, SI, I, /*EraseExpanded*/false, Prefix + "-"); 
         //I->Tok->ExpandedFrom.pop_back();
         I = Line.Tokens.erase(I);
-        llvm::errs() << Prefix << "  ";
+        //llvm::errs() << Prefix << "  ";
         continue;
       }
       //if (EraseExpanded || Expanded.find(I->Tok->ExpandedFrom.front()) != Expanded.end()) {
       assert(ExpandedTokens.find(I->Tok) == ExpandedTokens.end());
-      llvm::errs() << "? ";
+      //llvm::errs() << "?(" << I->Tok->ExpandedFrom.back()->TokenText << ") ";
       I = Line.Tokens.erase(I);
       continue;
     } else {
       if (ExpandedTokens.find(I->Tok) != ExpandedTokens.end()) {
-        llvm::errs() << "* ";
+        //llvm::errs() << "* ";
         I = Line.Tokens.erase(I);
         continue;
       }
       ExpandedTokens.insert(I->Tok);
     }
-    llvm::errs() << " ";
+    //llvm::errs() << " ";
     for (UnwrappedLine &Child : I->Children) {
       unexpandRange(Child, Child.Tokens.begin(), Child.Tokens.end(), EraseExpanded, Prefix + "_");
-      llvm::errs() << Prefix << "  ";
+      //llvm::errs() << Prefix << "  ";
     }
     ++I;
   }
-  llvm::errs() << "\n";
+  //llvm::errs() << "\n";
 }
+
+void forEachToken(
+    const UnwrappedLine &Line,
+    const std::function<void(FormatToken *, FormatToken *, bool)> &Call,
+    FormatToken *Parent = nullptr) {
+  bool First = true;
+  for (const auto &N : Line.Tokens) {
+    Call(N.Tok, Parent, First);
+    First = false;
+    for (const auto &Child : N.Children) {
+      forEachToken(Child, Call, N.Tok);
+    }
+  }
+}
+
+class Unexpander {
+public:
+  Unexpander(
+      unsigned Level,
+      const std::map<FormatToken *, std::unique_ptr<UnwrappedLine>> &Unexpanded)
+      : Level(Level), Unexpanded(Unexpanded) {
+    Result.Level = Level;
+    Result.Tokens.push_back({});
+    Lines.push_back(&Result);
+  }
+
+  void popUntil(FormatToken *Parent) {
+    llvm::errs() << "Popping until " << Parent << "\n";
+    while (Parent != Lines.back()->Tokens.back().Tok) {
+      Lines.pop_back();
+      assert(!Lines.empty());
+    }
+  }
+
+  void popUntilPrevious(FormatToken *Parent) {
+    llvm::errs() << "Popping until previous " << Parent << "\n";
+    while (Parent != Previous().Tokens.back().Tok) {
+      Lines.pop_back();
+      assert(!Lines.empty());
+    }
+  }
+
+  // a b    e f
+  //   \c d 
+  //
+  //
+
+  void add(FormatToken *Token, FormatToken *Parent, bool First) {
+    assert(!Finalized);
+    if (First) {
+      popUntil(Parent);
+      assert(!Lines.empty());
+      Lines.back()->Tokens.back().Children.push_back({});
+      Lines.push_back(&Lines.back()->Tokens.back().Children.back());
+    } else if (Parent == Lines.back()->Tokens.back().Tok) {
+      Lines.back()->Tokens.back().Children.push_back({});
+      Lines.push_back(&Lines.back()->Tokens.back().Children.back());
+    } else if (Previous().Tokens.back().Tok != Parent) {
+      popUntilPrevious(Parent);
+    }
+    assert(Previous().Tokens.back().Tok == Parent);
+    llvm::errs() << Token->TokenText << " <- " << (Parent != nullptr ? Parent->TokenText : "<>") 
+      << Lines.back() << "\n";
+    Lines.back()->Tokens.push_back(Token);
+  }
+
+  UnwrappedLine &Previous() {
+    return **std::prev(std::prev(Lines.end()));
+  }
+
+  bool finished() {
+    return true;
+  }
+
+  const UnwrappedLine &getResult() { 
+    finalize();
+    return Result; 
+  }
+
+private:
+  void finalize() {
+    if (Finalized) return;
+    Finalized = true;
+    assert(Result.Tokens.size() == 1);
+    UnwrappedLine Final = Result.Tokens.front().Children.front();
+    assert(!Final.Tokens.empty());
+    for (int I = 1, E = Result.Tokens.front().Children.size(); I != E; ++I) {
+      Final.Tokens.front().Children.push_back(Result.Tokens.front().Children[I]);
+    }
+    Result = Final;
+  }
+
+  unsigned Level;
+  const std::map<FormatToken *, std::unique_ptr<UnwrappedLine>> &Unexpanded;
+  UnwrappedLine Result;
+  llvm::SmallVector<UnwrappedLine *, 4> Lines;
+  UnwrappedLineNode *Root = nullptr;
+  bool Finalized = false;
+};
 
 void UnwrappedLineParser::unexpand(UnwrappedLine &Line) {
   llvm::errs() << "\nUnexpanding line ---------------------\n";
+
+  forEachToken(Line, [&](FormatToken *Token, FormatToken *Parent, bool First) {
+    Unexpand->add(Token, Parent, First);
+  });
+  return;
+
+
   auto I = Line.Tokens.begin();
   auto E = Line.Tokens.end();
-  llvm::errs() << "Before:\n";
-  printDebugInfo(Line);
+  //llvm::errs() << "Before:\n";
+  //printDebugInfo(Line);
   //llvm::DenseSet<FormatToken*> Expanded;
   unexpandRange(Line, I, E, /*EraseExpanded=*/true, "");
-  llvm::errs() << "After:\n";
-  printDebugInfo(Line);
-  llvm::errs() << "\n--------------------------------------\n\n";
+  //llvm::errs() << "After:\n";
+  //printDebugInfo(Line);
+  //llvm::errs() << "\n--------------------------------------\n\n";
 }
 
 
@@ -2594,8 +2703,12 @@ void UnwrappedLineParser::addUnwrappedLine() {
       printDebugInfo(*Line);
   });
   if (!InExpansion && containsExpansion(*Line)) {
-      UnwrappedLine Unexpanded = *Line;
-      unexpand(Unexpanded);
+    if (!Unexpand) {
+      Unexpand = llvm::make_unique<Unexpander>(Line->Level, Unexpanded);
+    }
+    unexpand(*Line);
+    if (Unexpand->finished()) {
+      UnwrappedLine Unexpanded = Unexpand->getResult();
       if (!Unexpanded.Tokens.empty()) {
         LLVM_DEBUG({
           if (CurrentLines == &Lines)
@@ -2603,8 +2716,11 @@ void UnwrappedLineParser::addUnwrappedLine() {
         });
         CurrentLines->push_back(std::move(Unexpanded));
       }
+      Unexpand.reset();
+    }
     ExpandedLines.push_back(std::move(*Line));
   } else {
+    assert(!Unexpand);
     CurrentLines->push_back(std::move(*Line));
   }
   //}

@@ -12152,6 +12152,7 @@ TEST_F(FormatTest, TodoMacros) {
   Style.Macros.push_back("STMT f();");
   Style.Macros.push_back("ID(x) x");
   Style.Macros.push_back("ID3(x, y, z) x y z");
+  Style.Macros.push_back("CALL(x) f([] { x })");
 
   verifyFormat("CLASS\n"
                "  a *b;\n"
@@ -12160,19 +12161,31 @@ TEST_F(FormatTest, TodoMacros) {
                "a SEMI\n"
                "a SEMI", Style);
   verifyFormat("void f() { ID(a *b); }", Style);
-  verifyFormat("STMT\n"
-               "STMT\n"
-               "STMT", Style);
   verifyFormat("ID({ ID(a *b); });", Style);
 
   Style.ColumnLimit = 10;
   EXPECT_EQ(R"(
-    
-)", format(R"(
-ID3(CLASS a*b; };, ID(a*b);, STMT STMT STMT)
+ID3(
+    {
+      CLASS
+        a *b;
+      };
+    },
+    ID(a *b);
+    ,
+    STMT STMT
+        STMT)
 void f();
-)", Style));
-
+)",
+            format(R"(
+ID3({CLASS a*b; };}, ID(a*b);, STMT STMT STMT)
+void f();
+)",
+                   Style));
+  verifyFormat("STMT\n"
+               "STMT\n"
+               "STMT", Style);
+  verifyFormat("ID(CALL(CALL(a * b)));", Style);
 
   //verifyFormat("a; b; c;");
   //verifyFormat("void f() { a *b; }");
