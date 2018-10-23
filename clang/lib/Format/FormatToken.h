@@ -316,6 +316,7 @@ struct FormatToken {
   llvm::SmallVector<FormatToken*, 1> ExpandedFrom;
   //FormatToken *ExpandedFrom = nullptr;
   bool StartOfExpansion = false;
+  int EndOfExpansion = 0;
 
   bool is(tok::TokenKind Kind) const { return Tok.is(Kind); }
   bool is(TokenType TT) const { return Type == TT; }

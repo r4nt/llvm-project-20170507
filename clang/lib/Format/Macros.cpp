@@ -194,10 +194,11 @@ llvm::SmallVector<FormatToken*, 8> Macros::Expand2(FormatToken *ID, llvm::ArrayR
       if (I != ArgMap.end()) {
         if (I->getValue() < Args.size()) {
           for (const auto &Tok : Args[I->getValue()]) {
-            Tok->Macro = MS_Expansion;
+            if (Tok->Macro == MS_None)
+              Tok->Macro = MS_Expansion;
+            Tok->ExpandedFrom.push_back(ID);
             if (First) {
               Tok->StartOfExpansion = true;
-              Tok->ExpandedFrom.push_back(ID);
             }
             /*
             if (Tok->ExpandedFrom == nullptr) {
@@ -214,14 +215,17 @@ llvm::SmallVector<FormatToken*, 8> Macros::Expand2(FormatToken *ID, llvm::ArrayR
     FormatToken *New = new (Allocator.Allocate()) FormatToken;
     Tok->copyInto(*New);
     //New->ExpandedFrom = ID;
+    assert(New->Macro == MS_None);
     New->Macro = MS_Hidden;
+    New->ExpandedFrom.push_back(ID);
     if (First) {
       New->StartOfExpansion = true;
-      New->ExpandedFrom.push_back(ID);
     }
     Result.push_back(New);
     First = false;
   }
+  assert(Result.size() >= 2);
+  ++Result[Result.size()-2]->EndOfExpansion;
   return Result;
 }
 

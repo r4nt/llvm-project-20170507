@@ -2597,7 +2597,13 @@ public:
   //
   //
 
-  void add(FormatToken *Token, FormatToken *Parent, bool First) {
+  void add(FormatToken *Token, FormatToken *OriginalParent, bool First) {
+    llvm::errs() << Token->TokenText << " <- "
+                 << (OriginalParent != nullptr ? OriginalParent->TokenText
+                                               : "<>")
+                 << Lines.back() << " " << Token->EndOfExpansion << "\n";
+    auto I = ByToken.find(OriginalParent);
+    FormatToken *Parent = (I == ByToken.end() ? OriginalParent : I->second);
     assert(!Finalized);
     if (First) {
       popUntil(Parent);
@@ -2611,8 +2617,116 @@ public:
       popUntilPrevious(Parent);
     }
     assert(Previous().Tokens.back().Tok == Parent);
-    llvm::errs() << Token->TokenText << " <- " << (Parent != nullptr ? Parent->TokenText : "<>") 
-      << Lines.back() << "\n";
+    expand(Token);
+  }
+
+  void expand(FormatToken *Token) {
+    if (Token->StartOfExpansion) {
+      if (!Stack.empty())
+        continueExpansion(Token);
+      startExpansion(Token);
+      continueExpansion(Token);
+      endExpansion(Token);
+      return;
+    }
+    if (Token->Macro != MS_None) {
+      continueExpansion(Token);
+      endExpansion(Token);
+      return;
+    }
+    push(Token);
+  }
+
+  // C(X, Y) Y X
+  // C(ID(a), b) -> b a
+
+  void endExpansion(FormatToken  *Token) {
+    if (Token->EndOfExpansion == 0) return;
+    assert(Stack.size() >= Token->EndOfExpansion);
+    for (int I = 0; I < Token->EndOfExpansion; ++I) {
+      for (auto &T = Stack.back().I; T != Stack.back().Expansion->Tokens.end();
+           ++T) {
+        unexpand(T->Tok);
+      }
+      llvm::errs() << "Popping stack\n";
+      Stack.pop_back();
+    }
+  }
+
+  void unexpand(FormatToken *Token) {
+    llvm::errs() << "Unexpand: " << Token->TokenText << " " << Stack.size()
+                 << " / " << Token->ExpandedFrom.size() << "\n";
+    // FIXME: Just use Stack.back().I here.
+    if (Token->Macro == MS_Hidden) {
+      llvm::errs() << "Skipping (hidden): " << Token->TokenText << "\n";
+      return;
+    }
+    //assert(Stack.size() <= Token->ExpandedFrom.size());
+    if (Stack.size() < Token->ExpandedFrom.size()) {
+      llvm::errs() << "Skipping (wrong level): " << Token->TokenText << "\n";
+      return;
+    }
+    push(Token);
+  }
+
+  void startExpansion(FormatToken *Token) {
+    assert(!Token->ExpandedFrom.empty());
+    size_t I = 0;
+    assert(Stack.size() <= Token->ExpandedFrom.size());
+    llvm::errs() << "Stack: " << Stack.size() << "\n";
+    for (; I < Stack.size(); ++I) {
+      llvm::errs() << Stack[I].ID << " <-> "
+                   << Token->ExpandedFrom[Token->ExpandedFrom.size() - 1 - I]
+                   << "\n";
+      assert(Stack[I].ID == Token->ExpandedFrom[Token->ExpandedFrom.size()-1-I]);
+    }
+    for (; I < Token->ExpandedFrom.size(); ++I) {
+      llvm::errs() << "Expanding level: " << I << "\n";
+      FormatToken *ID = Token->ExpandedFrom[Token->ExpandedFrom.size()-1-I];
+      // FIXME: Can the memory of Lines.back()->Tokens.back() change?
+      if (Root == nullptr) Root = &Lines.back()->Tokens.back();
+      auto IU = Unexpanded.find(ID);
+      assert(IU != Unexpanded.end());
+      llvm::errs() << "Pushing stack\n";
+      printDebugInfo(*IU->second);
+      Stack.push_back({ID, IU->second.get(), IU->second->Tokens.begin()});
+      auto &T = Stack.back().I;
+      push(T->Tok);
+      ++T;
+      if (T == Stack.back().Expansion->Tokens.end()) continue;
+      assert(T->Tok->is(tok::l_paren));
+      push(T->Tok);
+      ++T;
+      llvm::errs() << "Next: " << T->Tok->TokenText << "\n";
+    }
+    ByToken[Token] = Lines.back()->Tokens.back().Tok;
+  }
+
+  void continueExpansion(FormatToken *Token) {
+    assert(!Stack.empty());
+    if (Token->Macro == MS_Hidden) {
+      ByToken[Token] = Lines.back()->Tokens.back().Tok;
+      return;
+    }
+    llvm::errs() << "Continuing...\n";
+    llvm::errs() << "Stack: " << Stack.size() << "\n";
+    llvm::errs() << "Looking for: " << Token->TokenText << " " << Token->Macro
+                 << "\n";
+    auto &T = Stack.back().I;
+    // FIXME: If Token was already expanded earlier, due to
+    // a change in order, we will not find it, but need to
+    // skip it.
+    for (; T != Stack.back().Expansion->Tokens.end() && T->Tok != Token; ++T) {
+      llvm::errs() << "Comparing: " << T->Tok->TokenText << "\n";
+      unexpand(T->Tok);
+    }
+    push(T->Tok);
+    ++T;
+    // ByToken[Token] = Lines.back()->Tokens.back().Tok;
+  }
+
+  void push(FormatToken *Token) {
+    llvm::errs() << "Pushing " << Token->TokenText << "\n";
     Lines.back()->Tokens.push_back(Token);
   }
 
@@ -2621,7 +2735,7 @@ public:
   }
 
   bool finished() {
-    return true;
+    return Root != nullptr && Stack.empty();
   }
 
   const UnwrappedLine &getResult() { 
@@ -2642,12 +2756,20 @@ private:
     Result = Final;
   }
 
+  struct Entry {
+    FormatToken *ID;
+    UnwrappedLine *Expansion;
+    std::list<UnwrappedLineNode>::iterator I;
+  };
+
   unsigned Level;
   const std::map<FormatToken *, std::unique_ptr<UnwrappedLine>> &Unexpanded;
   UnwrappedLine Result;
   llvm::SmallVector<UnwrappedLine *, 4> Lines;
   UnwrappedLineNode *Root = nullptr;
   bool Finalized = false;
+  llvm::DenseMap<FormatToken *, FormatToken *> ByToken;
+  llvm::SmallVector<Entry, 2> Stack;
 };
 
 void UnwrappedLineParser::unexpand(UnwrappedLine &Line) {
@@ -2702,7 +2824,7 @@ void UnwrappedLineParser::addUnwrappedLine() {
     if (CurrentLines == &Lines)
       printDebugInfo(*Line);
   });
-  if (!InExpansion && containsExpansion(*Line)) {
+  if (CurrentLines == &Lines && !InExpansion && containsExpansion(*Line)) {
     if (!Unexpand) {
       Unexpand = llvm::make_unique<Unexpander>(Line->Level, Unexpanded);
     }
@@ -3092,19 +3214,20 @@ llvm::SmallVector<llvm::SmallVector<FormatToken*, 8>, 1> UnwrappedLineParser::pa
   int Parens = 0;
   do {
     switch (FormatTok->Tok.getKind()) {
-    case tok::l_brace:
-      parseChildBlock();
-      break;
+    //case tok::l_brace:
+      //parseChildBlock();
+      //break;
     case tok::l_paren:
-      parseParens();
-      //++Parens;
-      //nextToken();
+      //parseParens();
+      ++Parens;
+      nextToken();
       break;
     case tok::r_paren: {
-      //if (Parens > 0) {
-      //  --Parens;
-      //  break;
-      //}
+      if (Parens > 0) {
+        --Parens;
+        nextToken();
+        break;
+      }
       //auto Last = FormatTok->Previous->getStartOfNonWhitespace();
       Args.push_back({});
       pushTokens(std::next(LastEnd), Line->Tokens.end(), Args.back());
