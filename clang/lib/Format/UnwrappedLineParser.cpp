@@ -2489,7 +2489,6 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
   }
 }
 
-<<<<<<< HEAD
 void UnwrappedLineParser::popExpandedFrom(const UnwrappedLine &Line, FormatToken *From) {
   for (const auto &N : Line.Tokens) {
     assert(N.Tok->ExpandedFrom.empty() || N.Tok->ExpandedFrom.back() == From);
@@ -2498,7 +2497,9 @@ void UnwrappedLineParser::popExpandedFrom(const UnwrappedLine &Line, FormatToken
     for (const UnwrappedLine &Child : N.Children) {
       popExpandedFrom(Child, From);
     }
-=======
+  }
+}
+
 void UnwrappedLineParser::parseStatementMacro()
 {
   nextToken();
@@ -2520,9 +2521,7 @@ LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
     llvm::dbgs() << I->Tok->Tok.getName() << "["
                  << "T=" << I->Tok->Type << ", OC=" << I->Tok->OriginalColumn
                  << "] ";
->>>>>>> master
   }
-  
 }
 
 bool UnwrappedLineParser::containsToken(const UnwrappedLine &Line, FormatToken *Tok) {
