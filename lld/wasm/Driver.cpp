@@ -349,7 +349,9 @@ void LinkerDriver::link(ArrayRef<const char *> ArgsArr) {
 
   // Handle --help
   if (Args.hasArg(OPT_help)) {
-    Parser.PrintHelp(outs(), ArgsArr[0], "LLVM Linker", false);
+    Parser.PrintHelp(outs(),
+                     (std::string(ArgsArr[0]) + " [options] file...").c_str(),
+                     "LLVM Linker", false);
     return;
   }
 
@@ -458,7 +460,7 @@ void LinkerDriver::link(ArrayRef<const char *> ArgsArr) {
     InputGlobal *StackPointer = make<InputGlobal>(Global, nullptr);
     StackPointer->Live = true;
 
-    static WasmSignature NullSignature = {{}, WASM_TYPE_NORESULT};
+    static WasmSignature NullSignature = {{}, {}};
 
     // Add synthetic symbols before any others
     WasmSym::CallCtors = Symtab->addSyntheticFunction(

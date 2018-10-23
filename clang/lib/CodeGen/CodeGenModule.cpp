@@ -154,7 +154,7 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
 
   if (CodeGenOpts.hasProfileClangUse()) {
     auto ReaderOrErr = llvm::IndexedInstrProfReader::create(
-        CodeGenOpts.ProfileInstrumentUsePath);
+        CodeGenOpts.ProfileInstrumentUsePath, CodeGenOpts.ProfileRemappingFile);
     if (auto E = ReaderOrErr.takeError()) {
       unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error,
                                               "Could not read profile %0: %1");
@@ -322,8 +322,6 @@ void CodeGenModule::checkAliases() {
       assert(FTy);
       if (!FTy->getReturnType()->isPointerTy())
         Diags.Report(Location, diag::err_ifunc_resolver_return);
-      if (FTy->getNumParams())
-        Diags.Report(Location, diag::err_ifunc_resolver_params);
     }
 
     llvm::Constant *Aliasee = Alias->getIndirectSymbol();
@@ -1301,9 +1299,19 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
     // Otherwise, propagate the inline hint attribute and potentially use its
     // absence to mark things as noinline.
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
-      if (any_of(FD->redecls(), [&](const FunctionDecl *Redecl) {
-            return Redecl->isInlineSpecified();
-          })) {
+      // Search function and template pattern redeclarations for inline.
+      auto CheckForInline = [](const FunctionDecl *FD) {
+        auto CheckRedeclForInline = [](const FunctionDecl *Redecl) {
+          return Redecl->isInlineSpecified();
+        };
+        if (any_of(FD->redecls(), CheckRedeclForInline))
+          return true;
+        const FunctionDecl *Pattern = FD->getTemplateInstantiationPattern();
+        if (!Pattern)
+          return false;
+        return any_of(Pattern->redecls(), CheckRedeclForInline);
+      };
+      if (CheckForInline(FD)) {
         B.addAttribute(llvm::Attribute::InlineHint);
       } else if (CodeGenOpts.getInlining() ==
                      CodeGenOptions::OnlyHintInlining &&
@@ -3671,6 +3679,10 @@ llvm::GlobalValue::LinkageTypes CodeGenModule::getLLVMLinkageForDeclarator(
       return llvm::GlobalVariable::WeakAnyLinkage;
   }
 
+  if (const auto *FD = D->getAsFunction())
+    if (FD->isMultiVersion() && Linkage == GVA_AvailableExternally)
+      return llvm::GlobalVariable::LinkOnceAnyLinkage;
+
   // We are guaranteed to have a strong definition somewhere else,
   // so we can use available_externally linkage.
   if (Linkage == GVA_AvailableExternally)
@@ -4108,17 +4120,17 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
 
   llvm::Constant *Zero = llvm::Constant::getNullValue(Int32Ty);
   llvm::Constant *Zeros[] = { Zero, Zero };
-  
+
   // If we don't already have it, get __CFConstantStringClassReference.
   if (!CFConstantStringClassRef) {
     llvm::Type *Ty = getTypes().ConvertType(getContext().IntTy);
     Ty = llvm::ArrayType::get(Ty, 0);
     llvm::Constant *C =
         CreateRuntimeVariable(Ty, "__CFConstantStringClassReference");
-    
+
     if (getTriple().isOSBinFormatELF() || getTriple().isOSBinFormatCOFF()) {
       llvm::GlobalValue *GV = nullptr;
-      
+
       if ((GV = dyn_cast<llvm::GlobalValue>(C))) {
         IdentifierInfo &II = getContext().Idents.get(GV->getName());
         TranslationUnitDecl *TUDecl = getContext().getTranslationUnitDecl();
@@ -4128,7 +4140,7 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
         for (const auto &Result : DC->lookup(&II))
           if ((VD = dyn_cast<VarDecl>(Result)))
             break;
-          
+
         if (getTriple().isOSBinFormatELF()) {
           if (!VD)
             GV->setLinkage(llvm::GlobalValue::ExternalLinkage);
@@ -4142,11 +4154,11 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
             GV->setLinkage(llvm::GlobalValue::ExternalLinkage);
           }
         }
-        
+
         setDSOLocal(GV);
       }
     }
-  
+
     // Decay array -> ptr
     CFConstantStringClassRef =
         llvm::ConstantExpr::getGetElementPtr(Ty, C, Zeros);
@@ -4199,7 +4211,7 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
   // the static linker to adjust permissions to read-only later on.
   else if (getTriple().isOSBinFormatELF())
     GV->setSection(".rodata");
-  
+
   // String.
   llvm::Constant *Str =
       llvm::ConstantExpr::getGetElementPtr(GV->getValueType(), GV, Zeros);
@@ -4878,7 +4890,7 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
   case Decl::OMPDeclareReduction:
     EmitOMPDeclareReduction(cast<OMPDeclareReductionDecl>(D));
     break;
- 
+
   case Decl::OMPRequires:
     EmitOMPRequiresDecl(cast<OMPRequiresDecl>(D));
     break;

@@ -29,7 +29,7 @@ namespace mca {
 
 void DispatchStage::notifyInstructionDispatched(const InstRef &IR,
                                                 ArrayRef<unsigned> UsedRegs,
-                                                unsigned UOps) {
+                                                unsigned UOps) const {
   LLVM_DEBUG(dbgs() << "[E] Instruction Dispatched: #" << IR << '\n');
   notifyEvent<HWInstructionEvent>(
       HWInstructionDispatchedEvent(IR, UsedRegs, UOps));
@@ -100,22 +100,37 @@ Error DispatchStage::dispatch(InstRef IR) {
     AvailableEntries -= NumMicroOps;
   }
 
+  // Check if this is an optimizable reg-reg move.
+  bool IsEliminated = false;
+  if (IS.isOptimizableMove()) {
+    assert(IS.getDefs().size() == 1 && "Expected a single input!");
+    assert(IS.getUses().size() == 1 && "Expected a single output!");
+    IsEliminated = PRF.tryEliminateMove(*IS.getDefs()[0], *IS.getUses()[0]);
+  }
+
   // A dependency-breaking instruction doesn't have to wait on the register
   // input operands, and it is often optimized at register renaming stage.
   // Update RAW dependencies if this instruction is not a dependency-breaking
   // instruction. A dependency-breaking instruction is a zero-latency
   // instruction that doesn't consume hardware resources.
   // An example of dependency-breaking instruction on X86 is a zero-idiom XOR.
-  for (std::unique_ptr<ReadState> &RS : IS.getUses())
-    if (!RS->isIndependentFromDef())
-      updateRAWDependencies(*RS, STI);
+  //
+  // We also don't update data dependencies for instructions that have been
+  // eliminated at register renaming stage.
+  if (!IsEliminated) {
+    for (std::unique_ptr<ReadState> &RS : IS.getUses()) {
+      if (!RS->isIndependentFromDef())
+        updateRAWDependencies(*RS, STI);
+    }
+  }
 
   // By default, a dependency-breaking zero-idiom is expected to be optimized
   // at register renaming stage. That means, no physical register is allocated
   // to the instruction.
   SmallVector<unsigned, 4> RegisterFiles(PRF.getNumRegisterFiles());
   for (std::unique_ptr<WriteState> &WS : IS.getDefs())
-    PRF.addRegisterWrite(WriteRef(IR.getSourceIndex(), WS.get()), RegisterFiles);
+    PRF.addRegisterWrite(WriteRef(IR.getSourceIndex(), WS.get()),
+                         RegisterFiles);
 
   // Reserve slots in the RCU, and notify the instruction that it has been
   // dispatched to the schedulers for execution.
@@ -129,6 +144,8 @@ Error DispatchStage::dispatch(InstRef IR) {
 }
 
 Error DispatchStage::cycleStart() {
+  PRF.cycleStart();
+
   if (!CarryOver) {
     AvailableEntries = DispatchWidth;
     return ErrorSuccess();
@@ -138,7 +155,7 @@ Error DispatchStage::cycleStart() {
   unsigned DispatchedOpcodes = DispatchWidth - AvailableEntries;
   CarryOver -= DispatchedOpcodes;
   assert(CarriedOver.isValid() && "Invalid dispatched instruction");
-  
+
   SmallVector<unsigned, 8> RegisterFiles(PRF.getNumRegisterFiles(), 0U);
   notifyInstructionDispatched(CarriedOver, RegisterFiles, DispatchedOpcodes);
   if (!CarryOver)

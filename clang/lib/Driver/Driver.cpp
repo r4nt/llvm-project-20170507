@@ -43,7 +43,6 @@
 #include "ToolChains/WebAssembly.h"
 #include "ToolChains/XCore.h"
 #include "clang/Basic/Version.h"
-#include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Config/config.h"
 #include "clang/Driver/Action.h"
 #include "clang/Driver/Compilation.h"
@@ -68,18 +67,21 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include <map>
 #include <memory>
 #include <utility>
 #if LLVM_ON_UNIX
 #include <unistd.h> // getpid
+#include <sysexits.h> // EX_IOERR
 #endif
 
 using namespace clang::driver;
@@ -88,7 +90,7 @@ using namespace llvm::opt;
 
 Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
                DiagnosticsEngine &Diags,
-               IntrusiveRefCntPtr<vfs::FileSystem> VFS)
+               IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS)
     : Opts(createDriverOptTable()), Diags(Diags), VFS(std::move(VFS)),
       Mode(GCCMode), SaveTemps(SaveTempsNone), BitcodeEmbed(EmbedNone),
       LTOMode(LTOK_None), ClangExecutable(ClangExecutable),
@@ -103,7 +105,7 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
 
   // Provide a sane fallback if no VFS is specified.
   if (!this->VFS)
-    this->VFS = vfs::getRealFileSystem();
+    this->VFS = llvm::vfs::getRealFileSystem();
 
   Name = llvm::sys::path::filename(ClangExecutable);
   Dir = llvm::sys::path::parent_path(ClangExecutable);
@@ -484,12 +486,25 @@ static llvm::Triple computeTargetTriple(const Driver &D,
   // If target is MIPS adjust the target triple
   // accordingly to provided ABI name.
   A = Args.getLastArg(options::OPT_mabi_EQ);
-  if (A && Target.isMIPS())
-    Target = llvm::StringSwitch<llvm::Triple>(A->getValue())
-                 .Case("32", Target.get32BitArchVariant())
-                 .Case("n32", Target.get64BitArchVariant())
-                 .Case("64", Target.get64BitArchVariant())
-                 .Default(Target);
+  if (A && Target.isMIPS()) {
+    StringRef ABIName = A->getValue();
+    if (ABIName == "32") {
+      Target = Target.get32BitArchVariant();
+      if (Target.getEnvironment() == llvm::Triple::GNUABI64 ||
+          Target.getEnvironment() == llvm::Triple::GNUABIN32)
+        Target.setEnvironment(llvm::Triple::GNU);
+    } else if (ABIName == "n32") {
+      Target = Target.get64BitArchVariant();
+      if (Target.getEnvironment() == llvm::Triple::GNU ||
+          Target.getEnvironment() == llvm::Triple::GNUABI64)
+        Target.setEnvironment(llvm::Triple::GNUABIN32);
+    } else if (ABIName == "64") {
+      Target = Target.get64BitArchVariant();
+      if (Target.getEnvironment() == llvm::Triple::GNU ||
+          Target.getEnvironment() == llvm::Triple::GNUABIN32)
+        Target.setEnvironment(llvm::Triple::GNUABI64);
+    }
+  }
 
   return Target;
 }
@@ -1387,8 +1402,9 @@ int Driver::ExecuteCompilation(
 
   // Otherwise, remove result files and print extra information about abnormal
   // failures.
+  int Res = 0;
   for (const auto &CmdPair : FailingCommands) {
-    int Res = CmdPair.first;
+    int CommandRes = CmdPair.first;
     const Command *FailingCommand = CmdPair.second;
 
     // Remove result files if we're not saving temps.
@@ -1397,9 +1413,18 @@ int Driver::ExecuteCompilation(
       C.CleanupFileMap(C.getResultFiles(), JA, true);
 
       // Failure result files are valid unless we crashed.
-      if (Res < 0)
+      if (CommandRes < 0)
         C.CleanupFileMap(C.getFailureResultFiles(), JA, true);
     }
+
+#if LLVM_ON_UNIX
+    // llvm/lib/Support/Unix/Signals.inc will exit with a special return code
+    // for SIGPIPE. Do not print diagnostics for this case.
+    if (CommandRes == EX_IOERR) {
+      Res = CommandRes;
+      continue;
+    }
+#endif
 
     // Print extra information about abnormal failures, if possible.
     //
@@ -1410,17 +1435,17 @@ int Driver::ExecuteCompilation(
     // diagnostics, so always print the diagnostic there.
     const Tool &FailingTool = FailingCommand->getCreator();
 
-    if (!FailingCommand->getCreator().hasGoodDiagnostics() || Res != 1) {
+    if (!FailingCommand->getCreator().hasGoodDiagnostics() || CommandRes != 1) {
       // FIXME: See FIXME above regarding result code interpretation.
-      if (Res < 0)
+      if (CommandRes < 0)
         Diag(clang::diag::err_drv_command_signalled)
             << FailingTool.getShortName();
       else
-        Diag(clang::diag::err_drv_command_failed) << FailingTool.getShortName()
-                                                  << Res;
+        Diag(clang::diag::err_drv_command_failed)
+            << FailingTool.getShortName() << CommandRes;
     }
   }
-  return 0;
+  return Res;
 }
 
 void Driver::PrintHelp(bool ShowHidden) const {
@@ -1433,7 +1458,8 @@ void Driver::PrintHelp(bool ShowHidden) const {
   if (!ShowHidden)
     ExcludedFlagsBitmask |= HelpHidden;
 
-  getOpts().PrintHelp(llvm::outs(), Name.c_str(), DriverTitle.c_str(),
+  std::string Usage = llvm::formatv("{0} [options] file...", Name).str();
+  getOpts().PrintHelp(llvm::outs(), Usage.c_str(), DriverTitle.c_str(),
                       IncludedFlagsBitmask, ExcludedFlagsBitmask,
                       /*ShowAllAliases=*/false);
 }
@@ -2486,11 +2512,13 @@ class OffloadingActionBuilder final {
   class HIPActionBuilder final : public CudaActionBuilderBase {
     /// The linker inputs obtained for each device arch.
     SmallVector<ActionList, 8> DeviceLinkerInputs;
+    bool Relocatable;
 
   public:
     HIPActionBuilder(Compilation &C, DerivedArgList &Args,
                      const Driver::InputList &Inputs)
-        : CudaActionBuilderBase(C, Args, Inputs, Action::OFK_HIP) {}
+        : CudaActionBuilderBase(C, Args, Inputs, Action::OFK_HIP),
+          Relocatable(false) {}
 
     bool canUseBundlerUnbundler() const override { return true; }
 
@@ -2499,23 +2527,68 @@ class OffloadingActionBuilder final {
                          phases::ID CurPhase, phases::ID FinalPhase,
                          PhasesTy &Phases) override {
       // amdgcn does not support linking of object files, therefore we skip
-      // backend and assemble phases to output LLVM IR.
-      if (CudaDeviceActions.empty() || CurPhase == phases::Backend ||
+      // backend and assemble phases to output LLVM IR. Except for generating
+      // non-relocatable device coee, where we generate fat binary for device
+      // code and pass to host in Backend phase.
+      if (CudaDeviceActions.empty() ||
+          (CurPhase == phases::Backend && Relocatable) ||
           CurPhase == phases::Assemble)
         return ABRT_Success;
 
-      assert((CurPhase == phases::Link ||
+      assert(((CurPhase == phases::Link && Relocatable) ||
               CudaDeviceActions.size() == GpuArchList.size()) &&
              "Expecting one action per GPU architecture.");
       assert(!CompileHostOnly &&
              "Not expecting CUDA actions in host-only compilation.");
 
-      // Save CudaDeviceActions to DeviceLinkerInputs for each GPU subarch.
-      // This happens to each device action originated from each input file.
-      // Later on, device actions in DeviceLinkerInputs are used to create
-      // device link actions in appendLinkDependences and the created device
-      // link actions are passed to the offload action as device dependence.
-      if (CurPhase == phases::Link) {
+      if (!Relocatable && CurPhase == phases::Backend) {
+        // If we are in backend phase, we attempt to generate the fat binary.
+        // We compile each arch to IR and use a link action to generate code
+        // object containing ISA. Then we use a special "link" action to create
+        // a fat binary containing all the code objects for different GPU's.
+        // The fat binary is then an input to the host action.
+        for (unsigned I = 0, E = GpuArchList.size(); I != E; ++I) {
+          // Create a link action to link device IR with device library
+          // and generate ISA.
+          ActionList AL;
+          AL.push_back(CudaDeviceActions[I]);
+          CudaDeviceActions[I] =
+              C.MakeAction<LinkJobAction>(AL, types::TY_Image);
+
+          // OffloadingActionBuilder propagates device arch until an offload
+          // action. Since the next action for creating fatbin does
+          // not have device arch, whereas the above link action and its input
+          // have device arch, an offload action is needed to stop the null
+          // device arch of the next action being propagated to the above link
+          // action.
+          OffloadAction::DeviceDependences DDep;
+          DDep.add(*CudaDeviceActions[I], *ToolChains.front(),
+                   CudaArchToString(GpuArchList[I]), AssociatedOffloadKind);
+          CudaDeviceActions[I] = C.MakeAction<OffloadAction>(
+              DDep, CudaDeviceActions[I]->getType());
+        }
+        // Create HIP fat binary with a special "link" action.
+        CudaFatBinary =
+            C.MakeAction<LinkJobAction>(CudaDeviceActions,
+                types::TY_HIP_FATBIN);
+
+        DA.add(*CudaFatBinary, *ToolChains.front(), /*BoundArch=*/nullptr,
+               AssociatedOffloadKind);
+        // Clear the fat binary, it is already a dependence to an host
+        // action.
+        CudaFatBinary = nullptr;
+
+        // Remove the CUDA actions as they are already connected to an host
+        // action or fat binary.
+        CudaDeviceActions.clear();
+
+        return ABRT_Success;
+      } else if (CurPhase == phases::Link) {
+        // Save CudaDeviceActions to DeviceLinkerInputs for each GPU subarch.
+        // This happens to each device action originated from each input file.
+        // Later on, device actions in DeviceLinkerInputs are used to create
+        // device link actions in appendLinkDependences and the created device
+        // link actions are passed to the offload action as device dependence.
         DeviceLinkerInputs.resize(CudaDeviceActions.size());
         auto LI = DeviceLinkerInputs.begin();
         for (auto *A : CudaDeviceActions) {
@@ -2547,6 +2620,13 @@ class OffloadingActionBuilder final {
                CudaArchToString(GpuArchList[I]), AssociatedOffloadKind);
         ++I;
       }
+    }
+
+    bool initialize() override {
+      Relocatable = Args.hasFlag(options::OPT_fgpu_rdc,
+          options::OPT_fno_gpu_rdc, /*Default=*/false);
+
+      return CudaActionBuilderBase::initialize();
     }
   };
 

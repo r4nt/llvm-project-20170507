@@ -622,6 +622,10 @@ void UnwrappedLineParser::calculateBraceTypes(bool ExpectClassBody) {
       }
       LBraceStack.pop_back();
       break;
+    case tok::identifier:
+      if (!Tok->is(TT_StatementMacro))
+          break;
+      LLVM_FALLTHROUGH;
     case tok::at:
     case tok::semi:
     case tok::kw_if:
@@ -1250,6 +1254,10 @@ void UnwrappedLineParser::parseStructuralElement() {
         return;
       }
     }
+    if (Style.isCpp() && FormatTok->is(TT_StatementMacro)) {
+      parseStatementMacro();
+      return;
+    }
     // In all other cases, parse the declaration.
     break;
   default:
@@ -1263,6 +1271,10 @@ void UnwrappedLineParser::parseStructuralElement() {
       if (FormatTok->Tok.is(tok::l_brace)) {
         nextToken();
         parseBracedList();
+        break;
+      } else if (Style.Language == FormatStyle::LK_Java &&
+                 FormatTok->is(Keywords.kw_interface)) {
+        nextToken();
         break;
       }
       switch (FormatTok->Tok.getObjCKeywordID()) {
@@ -1448,6 +1460,11 @@ void UnwrappedLineParser::parseStructuralElement() {
         }
         parseRecord();
         addUnwrappedLine();
+        return;
+      }
+
+      if (Style.isCpp() && FormatTok->is(TT_StatementMacro)) {
+        parseStatementMacro();
         return;
       }
 
@@ -2293,6 +2310,8 @@ void UnwrappedLineParser::parseObjCMethod() {
       addUnwrappedLine();
       return;
     } else if (FormatTok->Tok.is(tok::l_brace)) {
+      if (Style.BraceWrapping.AfterFunction)
+        addUnwrappedLine();
       parseBlock(/*MustBeDeclaration=*/false);
       addUnwrappedLine();
       return;
@@ -2470,6 +2489,7 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
   }
 }
 
+<<<<<<< HEAD
 void UnwrappedLineParser::popExpandedFrom(const UnwrappedLine &Line, FormatToken *From) {
   for (const auto &N : Line.Tokens) {
     assert(N.Tok->ExpandedFrom.empty() || N.Tok->ExpandedFrom.back() == From);
@@ -2478,6 +2498,29 @@ void UnwrappedLineParser::popExpandedFrom(const UnwrappedLine &Line, FormatToken
     for (const UnwrappedLine &Child : N.Children) {
       popExpandedFrom(Child, From);
     }
+=======
+void UnwrappedLineParser::parseStatementMacro()
+{
+  nextToken();
+  if (FormatTok->is(tok::l_paren))
+    parseParens();
+  if (FormatTok->is(tok::semi))
+    nextToken();
+  addUnwrappedLine();
+}
+
+LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
+                                                 StringRef Prefix = "") {
+  llvm::dbgs() << Prefix << "Line(" << Line.Level
+               << ", FSC=" << Line.FirstStartColumn << ")"
+               << (Line.InPPDirective ? " MACRO" : "") << ": ";
+  for (std::list<UnwrappedLineNode>::const_iterator I = Line.Tokens.begin(),
+                                                    E = Line.Tokens.end();
+       I != E; ++I) {
+    llvm::dbgs() << I->Tok->Tok.getName() << "["
+                 << "T=" << I->Tok->Type << ", OC=" << I->Tok->OriginalColumn
+                 << "] ";
+>>>>>>> master
   }
   
 }

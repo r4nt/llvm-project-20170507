@@ -73,6 +73,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
@@ -134,7 +135,9 @@ StringRef CodeViewDebug::getFullFilepath(const DIFile *File) {
 
   // If this is a Unix-style path, just use it as is. Don't try to canonicalize
   // it textually because one of the path components could be a symlink.
-  if (!Dir.empty() && Dir[0] == '/') {
+  if (Dir.startswith("/") || Filename.startswith("/")) {
+    if (llvm::sys::path::is_absolute(Filename, llvm::sys::path::Style::posix))
+      return Filename;
     Filepath = Dir;
     if (Dir.back() != '/')
       Filepath += '/';
@@ -355,6 +358,36 @@ TypeIndex CodeViewDebug::getFuncIdForSubprogram(const DISubprogram *SP) {
   return recordTypeIndexForDINode(SP, TI);
 }
 
+static bool isTrivial(const DICompositeType *DCTy) {
+  return ((DCTy->getFlags() & DINode::FlagTrivial) == DINode::FlagTrivial);
+}
+
+static FunctionOptions
+getFunctionOptions(const DISubroutineType *Ty,
+                   const DICompositeType *ClassTy = nullptr,
+                   StringRef SPName = StringRef("")) {
+  FunctionOptions FO = FunctionOptions::None;
+  const DIType *ReturnTy = nullptr;
+  if (auto TypeArray = Ty->getTypeArray()) {
+    if (TypeArray.size())
+      ReturnTy = TypeArray[0].resolve();
+  }
+
+  if (auto *ReturnDCTy = dyn_cast_or_null<DICompositeType>(ReturnTy)) {
+    if (!isTrivial(ReturnDCTy))
+      FO |= FunctionOptions::CxxReturnUdt;
+  }
+
+  // DISubroutineType is unnamed. Use DISubprogram's i.e. SPName in comparison.
+  if (ClassTy && !isTrivial(ClassTy) && SPName == ClassTy->getName()) {
+    FO |= FunctionOptions::Constructor;
+
+  // TODO: put the FunctionOptions::ConstructorWithVirtualBases flag.
+
+  }
+  return FO;
+}
+
 TypeIndex CodeViewDebug::getMemberFunctionType(const DISubprogram *SP,
                                                const DICompositeType *Class) {
   // Always use the method declaration as the key for the function type. The
@@ -374,8 +407,10 @@ TypeIndex CodeViewDebug::getMemberFunctionType(const DISubprogram *SP,
   // member function type.
   TypeLoweringScope S(*this);
   const bool IsStaticMethod = (SP->getFlags() & DINode::FlagStaticMember) != 0;
+
+  FunctionOptions FO = getFunctionOptions(SP->getType(), Class, SP->getName());
   TypeIndex TI = lowerTypeMemberFunction(
-      SP->getType(), Class, SP->getThisAdjustment(), IsStaticMethod);
+      SP->getType(), Class, SP->getThisAdjustment(), IsStaticMethod, FO);
   return recordTypeIndexForDINode(SP, TI, Class);
 }
 
@@ -525,6 +560,11 @@ void CodeViewDebug::endModule() {
   // This subsection holds the string table.
   OS.AddComment("String table");
   OS.EmitCVStringTableDirective();
+
+  // Emit S_BUILDINFO, which points to LF_BUILDINFO. Put this in its own symbol
+  // subsection in the generic .debug$S section at the end. There is no
+  // particular reason for this ordering other than to match MSVC.
+  emitBuildInfo();
 
   // Emit type information and hashes last, so that any types we translate while
   // emitting function info are included.
@@ -735,6 +775,49 @@ void CodeViewDebug::emitCompilerInformation() {
   emitNullTerminatedSymbolName(OS, CompilerVersion);
 
   OS.EmitLabel(CompilerEnd);
+}
+
+static TypeIndex getStringIdTypeIdx(GlobalTypeTableBuilder &TypeTable,
+                                    StringRef S) {
+  StringIdRecord SIR(TypeIndex(0x0), S);
+  return TypeTable.writeLeafType(SIR);
+}
+
+void CodeViewDebug::emitBuildInfo() {
+  // First, make LF_BUILDINFO. It's a sequence of strings with various bits of
+  // build info. The known prefix is:
+  // - Absolute path of current directory
+  // - Compiler path
+  // - Main source file path, relative to CWD or absolute
+  // - Type server PDB file
+  // - Canonical compiler command line
+  // If frontend and backend compilation are separated (think llc or LTO), it's
+  // not clear if the compiler path should refer to the executable for the
+  // frontend or the backend. Leave it blank for now.
+  TypeIndex BuildInfoArgs[BuildInfoRecord::MaxArgs] = {};
+  NamedMDNode *CUs = MMI->getModule()->getNamedMetadata("llvm.dbg.cu");
+  const MDNode *Node = *CUs->operands().begin(); // FIXME: Multiple CUs.
+  const auto *CU = cast<DICompileUnit>(Node);
+  const DIFile *MainSourceFile = CU->getFile();
+  BuildInfoArgs[BuildInfoRecord::CurrentDirectory] =
+      getStringIdTypeIdx(TypeTable, MainSourceFile->getDirectory());
+  BuildInfoArgs[BuildInfoRecord::SourceFile] =
+      getStringIdTypeIdx(TypeTable, MainSourceFile->getFilename());
+  // FIXME: Path to compiler and command line. PDB is intentionally blank unless
+  // we implement /Zi type servers.
+  BuildInfoRecord BIR(BuildInfoArgs);
+  TypeIndex BuildInfoIndex = TypeTable.writeLeafType(BIR);
+
+  // Make a new .debug$S subsection for the S_BUILDINFO record, which points
+  // from the module symbols into the type stream.
+  MCSymbol *BuildInfoEnd = beginCVSubsection(DebugSubsectionKind::Symbols);
+  OS.AddComment("Record length");
+  OS.EmitIntValue(6, 2);
+  OS.AddComment("Record kind: S_BUILDINFO");
+  OS.EmitIntValue(unsigned(SymbolKind::S_BUILDINFO), 2);
+  OS.AddComment("LF_BUILDINFO index");
+  OS.EmitIntValue(BuildInfoIndex.getIndex(), 4);
+  endCVSubsection(BuildInfoEnd);
 }
 
 void CodeViewDebug::emitInlineeLinesSubsection() {
@@ -1255,6 +1338,7 @@ void CodeViewDebug::beginFunctionImpl(const MachineFunction *MF) {
   // instruction (AArch64), this will be zero.
   CurFn->CSRSize = MFI.getCVBytesOfCalleeSavedRegisters();
   CurFn->FrameSize = MFI.getStackSize();
+  CurFn->HasStackRealignment = TRI->needsStackRealignment(*MF);
 
   // For this function S_FRAMEPROC record, figure out which codeview register
   // will be the frame pointer.
@@ -1267,7 +1351,7 @@ void CodeViewDebug::beginFunctionImpl(const MachineFunction *MF) {
     } else {
       // If there is an FP, parameters are always relative to it.
       CurFn->EncodedParamFramePtrReg = EncodedFramePtrReg::FramePtr;
-      if (TRI->needsStackRealignment(*MF)) {
+      if (CurFn->HasStackRealignment) {
         // If the stack needs realignment, locals are relative to SP or VFRAME.
         CurFn->EncodedLocalFramePtrReg = EncodedFramePtrReg::StackPtr;
       } else {
@@ -1775,15 +1859,17 @@ TypeIndex CodeViewDebug::lowerTypeFunction(const DISubroutineType *Ty) {
 
   CallingConvention CC = dwarfCCToCodeView(Ty->getCC());
 
-  ProcedureRecord Procedure(ReturnTypeIndex, CC, FunctionOptions::None,
-                            ArgTypeIndices.size(), ArgListIndex);
+  FunctionOptions FO = getFunctionOptions(Ty);
+  ProcedureRecord Procedure(ReturnTypeIndex, CC, FO, ArgTypeIndices.size(),
+                            ArgListIndex);
   return TypeTable.writeLeafType(Procedure);
 }
 
 TypeIndex CodeViewDebug::lowerTypeMemberFunction(const DISubroutineType *Ty,
                                                  const DIType *ClassTy,
                                                  int ThisAdjustment,
-                                                 bool IsStaticMethod) {
+                                                 bool IsStaticMethod,
+                                                 FunctionOptions FO) {
   // Lower the containing class type.
   TypeIndex ClassType = getTypeIndex(ClassTy);
 
@@ -1814,10 +1900,8 @@ TypeIndex CodeViewDebug::lowerTypeMemberFunction(const DISubroutineType *Ty,
 
   CallingConvention CC = dwarfCCToCodeView(Ty->getCC());
 
-  // TODO: Need to use the correct values for FunctionOptions.
-  MemberFunctionRecord MFR(ReturnTypeIndex, ClassType, ThisTypeIndex, CC,
-                           FunctionOptions::None, ArgTypeIndices.size(),
-                           ArgListIndex, ThisAdjustment);
+  MemberFunctionRecord MFR(ReturnTypeIndex, ClassType, ThisTypeIndex, CC, FO,
+                           ArgTypeIndices.size(), ArgListIndex, ThisAdjustment);
   return TypeTable.writeLeafType(MFR);
 }
 
@@ -1898,12 +1982,20 @@ static ClassOptions getCommonClassOptions(const DICompositeType *Ty) {
   if (ImmediateScope && isa<DICompositeType>(ImmediateScope))
     CO |= ClassOptions::Nested;
 
-  // Put the Scoped flag on function-local types.
-  for (const DIScope *Scope = ImmediateScope; Scope != nullptr;
-       Scope = Scope->getScope().resolve()) {
-    if (isa<DISubprogram>(Scope)) {
+  // Put the Scoped flag on function-local types. MSVC puts this flag for enum
+  // type only when it has an immediate function scope. Clang never puts enums 
+  // inside DILexicalBlock scopes. Enum types, as generated by clang, are 
+  // always in function, class, or file scopes.
+  if (Ty->getTag() == dwarf::DW_TAG_enumeration_type) {
+    if (ImmediateScope && isa<DISubprogram>(ImmediateScope))
       CO |= ClassOptions::Scoped;
-      break;
+  } else {
+    for (const DIScope *Scope = ImmediateScope; Scope != nullptr;
+         Scope = Scope->getScope().resolve()) {
+      if (isa<DISubprogram>(Scope)) {
+        CO |= ClassOptions::Scoped;
+        break;
+      }
     }
   }
 
@@ -2502,13 +2594,18 @@ void CodeViewDebug::emitLocalVariable(const FunctionInfo &FI,
       int Offset = DefRange.DataOffset;
       unsigned Reg = DefRange.CVRegister;
 
-      // x86 call sequences often use PUSH instructions, which disrupt
+      // 32-bit x86 call sequences often use PUSH instructions, which disrupt
       // ESP-relative offsets. Use the virtual frame pointer, VFRAME or $T0,
-      // instead. In simple cases, $T0 will be the CFA. If the frame required
-      // re-alignment, it will be the CFA aligned downwards.
+      // instead. In simple cases, $T0 will be the CFA.
       if (RegisterId(Reg) == RegisterId::ESP) {
         Reg = unsigned(RegisterId::VFRAME);
         Offset -= FI.FrameSize;
+
+        // If the frame requires realignment, VFRAME will be ESP after it is
+        // aligned. We have to remove the ESP adjustments made to push CSRs and
+        // EBP. EBP is not included in CSRSize.
+        if (FI.HasStackRealignment)
+          Offset += FI.CSRSize + 4;
       }
 
       // If we can use the chosen frame pointer for the frame and this isn't a

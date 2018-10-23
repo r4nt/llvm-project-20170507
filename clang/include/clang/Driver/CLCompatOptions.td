@@ -158,6 +158,10 @@ def _SLASH_Qvec_ : CLFlag<"Qvec-">,
 def _SLASH_showIncludes : CLFlag<"showIncludes">,
   HelpText<"Print info about included files to stderr">,
   Alias<show_includes>;
+def _SLASH_showFilenames : CLFlag<"showFilenames">,
+  HelpText<"Print the name of each compiled file">;
+def _SLASH_showFilenames_ : CLFlag<"showFilenames-">,
+  HelpText<"Don't print the name of each compiled file (default)">;
 def _SLASH_source_charset : CLCompileJoined<"source-charset:">,
   HelpText<"Source encoding, supports only UTF-8">, Alias<finput_charset_EQ>;
 def _SLASH_execution_charset : CLCompileJoined<"execution-charset:">,
@@ -354,6 +358,7 @@ def _SLASH_errorReport : CLIgnoredJoined<"errorReport">;
 def _SLASH_FC : CLIgnoredFlag<"FC">;
 def _SLASH_Fd : CLIgnoredJoined<"Fd">;
 def _SLASH_FS : CLIgnoredFlag<"FS">;
+def _SLASH_JMC : CLIgnoredFlag<"JMC">;
 def _SLASH_kernel_ : CLIgnoredFlag<"kernel-">;
 def _SLASH_nologo : CLIgnoredFlag<"nologo">;
 def _SLASH_openmp_ : CLIgnoredFlag<"openmp-">;
@@ -405,7 +410,6 @@ def _SLASH_GZ : CLFlag<"GZ">;
 def _SLASH_H : CLFlag<"H">;
 def _SLASH_homeparams : CLFlag<"homeparams">;
 def _SLASH_hotpatch : CLFlag<"hotpatch">;
-def _SLASH_JMC : CLFlag<"JMC">;
 def _SLASH_kernel : CLFlag<"kernel">;
 def _SLASH_LN : CLFlag<"LN">;
 def _SLASH_MP : CLJoined<"MP">;

@@ -6935,3 +6935,9 @@ void OMPClauseWriter::VisitOMPUnifiedAddressClause(OMPUnifiedAddressClause *) {}
 
 void OMPClauseWriter::VisitOMPUnifiedSharedMemoryClause(
     OMPUnifiedSharedMemoryClause *) {}
+
+void OMPClauseWriter::VisitOMPReverseOffloadClause(OMPReverseOffloadClause *) {}
+
+void
+OMPClauseWriter::VisitOMPDynamicAllocatorsClause(OMPDynamicAllocatorsClause *) {
+}

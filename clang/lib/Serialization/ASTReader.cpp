@@ -11726,6 +11726,12 @@ OMPClause *OMPClauseReader::readClause() {
   case OMPC_unified_shared_memory:
     C = new (Context) OMPUnifiedSharedMemoryClause();
     break;
+  case OMPC_reverse_offload:
+    C = new (Context) OMPReverseOffloadClause();
+    break;
+  case OMPC_dynamic_allocators:
+    C = new (Context) OMPDynamicAllocatorsClause();
+    break;
   case OMPC_private:
     C = OMPPrivateClause::CreateEmpty(Context, Record.readInt());
     break;
@@ -11958,6 +11964,12 @@ void OMPClauseReader::VisitOMPUnifiedAddressClause(OMPUnifiedAddressClause *) {}
 
 void OMPClauseReader::VisitOMPUnifiedSharedMemoryClause(
     OMPUnifiedSharedMemoryClause *) {}
+
+void OMPClauseReader::VisitOMPReverseOffloadClause(OMPReverseOffloadClause *) {}
+
+void
+OMPClauseReader::VisitOMPDynamicAllocatorsClause(OMPDynamicAllocatorsClause *) {
+}
 
 void OMPClauseReader::VisitOMPPrivateClause(OMPPrivateClause *C) {
   C->setLParenLoc(Record.readSourceLocation());

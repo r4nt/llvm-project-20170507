@@ -291,6 +291,8 @@ def X86lock_dec  : SDNode<"X86ISD::LDEC",  SDTLockUnaryArithWithFlags,
 
 def X86bextr  : SDNode<"X86ISD::BEXTR",  SDTIntBinOp>;
 
+def X86bzhi   : SDNode<"X86ISD::BZHI",   SDTIntBinOp>;
+
 def X86mul_imm : SDNode<"X86ISD::MUL_IMM", SDTIntBinOp>;
 
 def X86WinAlloca : SDNode<"X86ISD::WIN_ALLOCA", SDT_X86WIN_ALLOCA,
@@ -1210,12 +1212,12 @@ def POP32rmr: I<0x8F, MRM0r, (outs GR32:$reg), (ins), "pop{l}\t$reg", []>,
                 OpSize32, Requires<[Not64BitMode]>, NotMemoryFoldable;
 } // isCodeGenOnly = 1, ForceDisassemble = 1
 } // mayLoad, SchedRW
-let mayStore = 1, mayLoad = 1, SchedRW = [WriteRMW] in {
+let mayStore = 1, mayLoad = 1, SchedRW = [WriteCopy] in {
 def POP16rmm: I<0x8F, MRM0m, (outs), (ins i16mem:$dst), "pop{w}\t$dst", []>,
                 OpSize16;
 def POP32rmm: I<0x8F, MRM0m, (outs), (ins i32mem:$dst), "pop{l}\t$dst", []>,
                 OpSize32, Requires<[Not64BitMode]>;
-} // mayStore, mayLoad, WriteRMW
+} // mayStore, mayLoad, SchedRW
 
 let mayStore = 1, SchedRW = [WriteStore] in {
 def PUSH16r  : I<0x50, AddRegFrm, (outs), (ins GR16:$reg), "push{w}\t$reg",[]>,
@@ -1243,7 +1245,7 @@ def PUSHi32  : Ii32<0x68, RawFrm, (outs), (ins i32imm:$imm),
                    Requires<[Not64BitMode]>;
 } // mayStore, SchedRW
 
-let mayLoad = 1, mayStore = 1, SchedRW = [WriteRMW] in {
+let mayLoad = 1, mayStore = 1, SchedRW = [WriteCopy] in {
 def PUSH16rmm: I<0xFF, MRM6m, (outs), (ins i16mem:$src), "push{w}\t$src", []>,
                  OpSize16;
 def PUSH32rmm: I<0xFF, MRM6m, (outs), (ins i32mem:$src), "push{l}\t$src", []>,
@@ -1302,7 +1304,7 @@ def POP64rmr: I<0x8F, MRM0r, (outs GR64:$reg), (ins), "pop{q}\t$reg", []>,
                 OpSize32, Requires<[In64BitMode]>, NotMemoryFoldable;
 } // isCodeGenOnly = 1, ForceDisassemble = 1
 } // mayLoad, SchedRW
-let mayLoad = 1, mayStore = 1, SchedRW = [WriteRMW] in
+let mayLoad = 1, mayStore = 1, SchedRW = [WriteCopy] in
 def POP64rmm: I<0x8F, MRM0m, (outs), (ins i64mem:$dst), "pop{q}\t$dst", []>,
                 OpSize32, Requires<[In64BitMode]>;
 let mayStore = 1, SchedRW = [WriteStore] in {
@@ -1314,7 +1316,7 @@ def PUSH64rmr: I<0xFF, MRM6r, (outs), (ins GR64:$reg), "push{q}\t$reg", []>,
                  OpSize32, Requires<[In64BitMode]>, NotMemoryFoldable;
 } // isCodeGenOnly = 1, ForceDisassemble = 1
 } // mayStore, SchedRW
-let mayLoad = 1, mayStore = 1, SchedRW = [WriteRMW] in {
+let mayLoad = 1, mayStore = 1, SchedRW = [WriteCopy] in {
 def PUSH64rmm: I<0xFF, MRM6m, (outs), (ins i64mem:$src), "push{q}\t$src", []>,
                  OpSize32, Requires<[In64BitMode]>;
 } // mayLoad, mayStore, SchedRW
@@ -2423,7 +2425,7 @@ multiclass bmi_bextr<bits<8> opc, string mnemonic, RegisterClass RC,
                     ReadDefault, ReadDefault, ReadDefault, ReadDefault,
                     ReadDefault,
                     // RC:$src2
-                    ReadAfterLd]>;
+                    Sched.ReadAfterFold]>;
 }
 
 let Predicates = [HasBMI], Defs = [EFLAGS] in {
@@ -2449,14 +2451,14 @@ multiclass bmi_bzhi<bits<8> opc, string mnemonic, RegisterClass RC,
                     ReadDefault, ReadDefault, ReadDefault, ReadDefault,
                     ReadDefault,
                     // RC:$src2
-                    ReadAfterLd]>;
+                    Sched.ReadAfterFold]>;
 }
 
 let Predicates = [HasBMI2], Defs = [EFLAGS] in {
   defm BZHI32 : bmi_bzhi<0xF5, "bzhi{l}", GR32, i32mem,
-                         int_x86_bmi_bzhi_32, loadi32, WriteBZHI>;
+                         X86bzhi, loadi32, WriteBZHI>;
   defm BZHI64 : bmi_bzhi<0xF5, "bzhi{q}", GR64, i64mem,
-                         int_x86_bmi_bzhi_64, loadi64, WriteBZHI>, VEX_W;
+                         X86bzhi, loadi64, WriteBZHI>, VEX_W;
 }
 
 def CountTrailingOnes : SDNodeXForm<imm, [{
@@ -2512,18 +2514,6 @@ let Predicates = [HasBMI2] in {
   multiclass bmi_bzhi_patterns<RegisterClass RC, int bitwidth, ValueType VT,
                                Instruction DstInst, X86MemOperand x86memop,
                                Instruction DstMemInst> {
-    // x & ((1 << y) - 1)
-    defm : _bmi_bzhi_pattern<(and RC:$src, (add (shl 1, GR8:$lz), -1)),
-                             (and (x86memop addr:$src),
-                                  (add (shl 1, GR8:$lz), -1)),
-                             RC, VT, DstInst, DstMemInst>;
-
-    // x & ~(-1 << y)
-    defm : _bmi_bzhi_pattern<(and RC:$src, (xor (shl -1, GR8:$lz), -1)),
-                             (and (x86memop addr:$src),
-                                  (xor (shl -1, GR8:$lz), -1)),
-                             RC, VT, DstInst, DstMemInst>;
-
     // x & (-1 >> (bitwidth - y))
     defm : _bmi_bzhi_pattern<(and RC:$src, (srl -1, (sub bitwidth, GR8:$lz))),
                              (and (x86memop addr:$src),
@@ -2585,7 +2575,7 @@ multiclass bmi_pdep_pext<string mnemonic, RegisterClass RC,
   def rm : I<0xF5, MRMSrcMem, (outs RC:$dst), (ins RC:$src1, x86memop:$src2),
              !strconcat(mnemonic, "\t{$src2, $src1, $dst|$dst, $src1, $src2}"),
              [(set RC:$dst, (Int RC:$src1, (ld_frag addr:$src2)))]>,
-             VEX_4V, Sched<[WriteALULd, ReadAfterLd]>;
+             VEX_4V, Sched<[WriteALU.Folded, WriteALU.ReadAfterFold]>;
 }
 
 let Predicates = [HasBMI2] in {
@@ -2976,6 +2966,8 @@ def : MnemonicAlias<"popf",  "popfl", "att">, Requires<[In32BitMode]>;
 def : MnemonicAlias<"popf",  "popfq", "att">, Requires<[In64BitMode]>;
 def : MnemonicAlias<"popf",  "popfq", "intel">, Requires<[In64BitMode]>;
 def : MnemonicAlias<"popfd", "popfl", "att">;
+def : MnemonicAlias<"popfw", "popf",  "intel">, Requires<[In32BitMode]>;
+def : MnemonicAlias<"popfw", "popf",  "intel">, Requires<[In64BitMode]>;
 
 // FIXME: This is wrong for "push reg".  "push %bx" should turn into pushw in
 // all modes.  However: "push (addr)" and "push $42" should default to
@@ -2988,6 +2980,8 @@ def : MnemonicAlias<"pushf",  "pushfl", "att">, Requires<[In32BitMode]>;
 def : MnemonicAlias<"pushf",  "pushfq", "att">, Requires<[In64BitMode]>;
 def : MnemonicAlias<"pushf",  "pushfq", "intel">, Requires<[In64BitMode]>;
 def : MnemonicAlias<"pushfd", "pushfl", "att">;
+def : MnemonicAlias<"pushfw", "pushf",  "intel">, Requires<[In32BitMode]>;
+def : MnemonicAlias<"pushfw", "pushf",  "intel">, Requires<[In64BitMode]>;
 
 def : MnemonicAlias<"popad",  "popal",  "intel">, Requires<[Not64BitMode]>;
 def : MnemonicAlias<"pushad", "pushal", "intel">, Requires<[Not64BitMode]>;

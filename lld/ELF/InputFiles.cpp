@@ -605,7 +605,7 @@ InputSectionBase *ObjFile<ELFT>::getRelocTarget(const Elf_Shdr &Sec) {
 // as a given section.
 static InputSection *toRegularSection(MergeInputSection *Sec) {
   return make<InputSection>(Sec->File, Sec->Flags, Sec->Type, Sec->Alignment,
-                            Sec->Data, Sec->Name);
+                            Sec->data(), Sec->Name);
 }
 
 template <class ELFT>
@@ -813,7 +813,7 @@ template <class ELFT> Symbol *ObjFile<ELFT>::createSymbol(const Elf_Sym *Sym) {
     if (Sec == &InputSection::Discarded)
       return Symtab->addUndefined<ELFT>(Name, Binding, StOther, Type,
                                         /*CanOmitFromDynSym=*/false, this);
-    return Symtab->addRegular(Name, StOther, Type, Value, Size, Binding, Sec,
+    return Symtab->addDefined(Name, StOther, Type, Value, Size, Binding, Sec,
                               this);
   }
 }
@@ -999,22 +999,22 @@ template <class ELFT> void SharedFile<ELFT>::parseRest() {
   for (size_t I = 0; I < Syms.size(); ++I) {
     const Elf_Sym &Sym = Syms[I];
 
+    // ELF spec requires that all local symbols precede weak or global
+    // symbols in each symbol table, and the index of first non-local symbol
+    // is stored to sh_info. If a local symbol appears after some non-local
+    // symbol, that's a violation of the spec.
     StringRef Name = CHECK(Sym.getName(this->StringTable), this);
+    if (Sym.getBinding() == STB_LOCAL) {
+      warn("found local symbol '" + Name +
+           "' in global part of symbol table in file " + toString(this));
+      continue;
+    }
+
     if (Sym.isUndefined()) {
       Symbol *S = Symtab->addUndefined<ELFT>(Name, Sym.getBinding(),
                                              Sym.st_other, Sym.getType(),
                                              /*CanOmitFromDynSym=*/false, this);
       S->ExportDynamic = true;
-      continue;
-    }
-
-    // ELF spec requires that all local symbols precede weak or global
-    // symbols in each symbol table, and the index of first non-local symbol
-    // is stored to sh_info. If a local symbol appears after some non-local
-    // symbol, that's a violation of the spec.
-    if (Sym.getBinding() == STB_LOCAL) {
-      warn("found local symbol '" + Name +
-           "' in global part of symbol table in file " + toString(this));
       continue;
     }
 
@@ -1188,7 +1188,7 @@ static ELFKind getELFKind(MemoryBufferRef MB) {
 }
 
 void BinaryFile::parse() {
-  ArrayRef<uint8_t> Data = toArrayRef(MB.getBuffer());
+  ArrayRef<uint8_t> Data = arrayRefFromStringRef(MB.getBuffer());
   auto *Section = make<InputSection>(this, SHF_ALLOC | SHF_WRITE, SHT_PROGBITS,
                                      8, Data, ".data");
   Sections.push_back(Section);
@@ -1202,11 +1202,11 @@ void BinaryFile::parse() {
     if (!isAlnum(S[I]))
       S[I] = '_';
 
-  Symtab->addRegular(Saver.save(S + "_start"), STV_DEFAULT, STT_OBJECT, 0, 0,
+  Symtab->addDefined(Saver.save(S + "_start"), STV_DEFAULT, STT_OBJECT, 0, 0,
                      STB_GLOBAL, Section, nullptr);
-  Symtab->addRegular(Saver.save(S + "_end"), STV_DEFAULT, STT_OBJECT,
+  Symtab->addDefined(Saver.save(S + "_end"), STV_DEFAULT, STT_OBJECT,
                      Data.size(), 0, STB_GLOBAL, Section, nullptr);
-  Symtab->addRegular(Saver.save(S + "_size"), STV_DEFAULT, STT_OBJECT,
+  Symtab->addDefined(Saver.save(S + "_size"), STV_DEFAULT, STT_OBJECT,
                      Data.size(), 0, STB_GLOBAL, nullptr, nullptr);
 }
 

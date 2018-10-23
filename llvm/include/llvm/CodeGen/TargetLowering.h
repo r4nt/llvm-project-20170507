@@ -2846,7 +2846,8 @@ public:
                             unsigned Depth = 0,
                             bool AssumeSingleUse = false) const;
 
-  /// Helper wrapper around SimplifyDemandedBits
+  /// Helper wrapper around SimplifyDemandedBits.
+  /// Adds Op back to the worklist upon success.
   bool SimplifyDemandedBits(SDValue Op, const APInt &DemandedMask,
                             DAGCombinerInfo &DCI) const;
 
@@ -2869,7 +2870,8 @@ public:
                                   TargetLoweringOpt &TLO, unsigned Depth = 0,
                                   bool AssumeSingleUse = false) const;
 
-  /// Helper wrapper around SimplifyDemandedVectorElts
+  /// Helper wrapper around SimplifyDemandedVectorElts.
+  /// Adds Op back to the worklist upon success.
   bool SimplifyDemandedVectorElts(SDValue Op, const APInt &DemandedElts,
                                   APInt &KnownUndef, APInt &KnownZero,
                                   DAGCombinerInfo &DCI) const;
@@ -3642,6 +3644,9 @@ public:
   /// \returns True, if the expansion was successful, false otherwise
   bool expandFP_TO_SINT(SDNode *N, SDValue &Result, SelectionDAG &DAG) const;
 
+  /// Expand fminnum/fmaxnum into fminnum_ieee/fmaxnum_ieee with quieted inputs.
+  SDValue expandFMINNUM_FMAXNUM(SDNode *N, SelectionDAG &DAG) const;
+
   /// Turn load of vector type into a load of the individual elements.
   /// \param LD load to expand
   /// \returns MERGE_VALUEs of the scalar loads with their chains.
@@ -3678,6 +3683,10 @@ public:
   /// bounds.
   SDValue getVectorElementPointer(SelectionDAG &DAG, SDValue VecPtr, EVT VecVT,
                                   SDValue Index) const;
+
+  /// Method for building the DAG expansion of ISD::[US]ADDSAT. This method
+  /// accepts integers or vectors of integers as its arguments.
+  SDValue getExpandedSaturationAddition(SDNode *Node, SelectionDAG &DAG) const;
 
   //===--------------------------------------------------------------------===//
   // Instruction Emitting Hooks

@@ -6441,7 +6441,7 @@ static bool isVarOnPath(IndirectLocalPath &Path, VarDecl *VD) {
 }
 
 static bool pathContainsInit(IndirectLocalPath &Path) {
-  return std::any_of(Path.begin(), Path.end(), [=](IndirectLocalPathEntry E) {
+  return llvm::any_of(Path, [=](IndirectLocalPathEntry E) {
     return E.Kind == IndirectLocalPathEntry::DefaultInit ||
            E.Kind == IndirectLocalPathEntry::VarInit;
   });
@@ -6784,6 +6784,20 @@ static void visitLocalsRetainedByInitializer(IndirectLocalPath &Path,
       }
     }
     return;
+  }
+
+  // The lifetime of an init-capture is that of the closure object constructed
+  // by a lambda-expression.
+  if (auto *LE = dyn_cast<LambdaExpr>(Init)) {
+    for (Expr *E : LE->capture_inits()) {
+      if (!E)
+        continue;
+      if (E->isGLValue())
+        visitLocalsRetainedByReferenceBinding(Path, E, RK_ReferenceBinding,
+                                              Visit);
+      else
+        visitLocalsRetainedByInitializer(Path, E, Visit, true);
+    }
   }
 
   if (isa<CallExpr>(Init) || isa<CXXConstructExpr>(Init))

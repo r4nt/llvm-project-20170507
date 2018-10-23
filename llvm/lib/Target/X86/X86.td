@@ -404,6 +404,21 @@ def FeatureFastBEXTR : SubtargetFeature<"fast-bextr", "HasFastBEXTR", "true",
           "Indicates that the BEXTR instruction is implemented as a single uop "
           "with good throughput.">;
 
+// Combine vector math operations with shuffles into horizontal math
+// instructions if a CPU implements horizontal operations (introduced with
+// SSE3) with better latency/throughput than the alternative sequence.
+def FeatureFastHorizontalOps
+    : SubtargetFeature<
+        "fast-hops", "HasFastHorizontalOps", "true",
+        "Prefer horizontal vector math instructions (haddp, phsub, etc.) over "
+        "normal vector instructions with shuffles", [FeatureSSE3]>;
+
+// Merge branches using three-way conditional code.
+def FeatureMergeToThreeWayBranch : SubtargetFeature<"merge-to-threeway-branch",
+                                        "ThreewayBranchProfitable", "true",
+                                        "Merge branches to a three-way "
+                                        "conditional branch">;
+
 //===----------------------------------------------------------------------===//
 // Register File Description
 //===----------------------------------------------------------------------===//
@@ -445,22 +460,8 @@ def ProcIntelGLP  : SubtargetFeature<"glp", "X86ProcFamily", "IntelGLP",
                     "Intel Goldmont Plus processors">;
 def ProcIntelTRM  : SubtargetFeature<"tremont", "X86ProcFamily", "IntelTRM",
                     "Intel Tremont processors">;
-def ProcIntelHSW  : SubtargetFeature<"haswell", "X86ProcFamily",
-                    "IntelHaswell", "Intel Haswell processors">;
-def ProcIntelBDW  : SubtargetFeature<"broadwell", "X86ProcFamily",
-                    "IntelBroadwell", "Intel Broadwell processors">;
-def ProcIntelSKL  : SubtargetFeature<"skylake", "X86ProcFamily",
-                    "IntelSkylake", "Intel Skylake processors">;
 def ProcIntelKNL  : SubtargetFeature<"knl", "X86ProcFamily",
                     "IntelKNL", "Intel Knights Landing processors">;
-def ProcIntelSKX  : SubtargetFeature<"skx", "X86ProcFamily",
-                    "IntelSKX", "Intel Skylake Server processors">;
-def ProcIntelCNL  : SubtargetFeature<"cannonlake", "X86ProcFamily",
-                    "IntelCannonlake", "Intel Cannonlake processors">;
-def ProcIntelICL  : SubtargetFeature<"icelake-client", "X86ProcFamily",
-                    "IntelIcelakeClient", "Intel Icelake processors">;
-def ProcIntelICX  : SubtargetFeature<"icelake-server", "X86ProcFamily",
-                    "IntelIcelakeServer", "Intel Icelake Server processors">;
 
 class Proc<string Name, list<SubtargetFeature> Features>
  : ProcessorModel<Name, GenericModel, Features>;
@@ -732,6 +733,7 @@ def SNBFeatures : ProcessorFeatures<[], [
   FeatureFastScalarFSQRT,
   FeatureFastSHLDRotate,
   FeatureSlowIncDec,
+  FeatureMergeToThreeWayBranch,
   FeatureMacroFusion
 ]>;
 
@@ -771,7 +773,6 @@ def HSWFeatures : ProcessorFeatures<IVBFeatures.Value, [
 
 class HaswellProc<string Name> : ProcModel<Name, HaswellModel,
                                            HSWFeatures.Value, [
-  ProcIntelHSW,
   FeaturePOPCNTFalseDeps,
   FeatureLZCNTFalseDeps
 ]>;
@@ -785,7 +786,6 @@ def BDWFeatures : ProcessorFeatures<HSWFeatures.Value, [
 ]>;
 class BroadwellProc<string Name> : ProcModel<Name, BroadwellModel,
                                              BDWFeatures.Value, [
-  ProcIntelBDW,
   FeaturePOPCNTFalseDeps,
   FeatureLZCNTFalseDeps
 ]>;
@@ -794,7 +794,6 @@ def : BroadwellProc<"broadwell">;
 def SKLFeatures : ProcessorFeatures<BDWFeatures.Value, [
   FeatureAES,
   FeatureMPX,
-  FeatureRTM,
   FeatureXSAVEC,
   FeatureXSAVES,
   FeatureCLFLUSHOPT,
@@ -803,7 +802,6 @@ def SKLFeatures : ProcessorFeatures<BDWFeatures.Value, [
 
 class SkylakeClientProc<string Name> : ProcModel<Name, SkylakeClientModel,
                                                  SKLFeatures.Value, [
-  ProcIntelSKL,
   FeatureHasFastGather,
   FeaturePOPCNTFalseDeps,
   FeatureSGX
@@ -858,7 +856,6 @@ def SKXFeatures : ProcessorFeatures<SKLFeatures.Value, [
 
 class SkylakeServerProc<string Name> : ProcModel<Name, SkylakeServerModel,
                                                  SKXFeatures.Value, [
-  ProcIntelSKX,
   FeatureHasFastGather,
   FeaturePOPCNTFalseDeps
 ]>;
@@ -880,7 +877,6 @@ def CNLFeatures : ProcessorFeatures<SKLFeatures.Value, [
 
 class CannonlakeProc<string Name> : ProcModel<Name, SkylakeServerModel,
                                               CNLFeatures.Value, [
-  ProcIntelCNL,
   FeatureHasFastGather
 ]>;
 def : CannonlakeProc<"cannonlake">;
@@ -899,14 +895,12 @@ def ICLFeatures : ProcessorFeatures<CNLFeatures.Value, [
 
 class IcelakeClientProc<string Name> : ProcModel<Name, SkylakeServerModel,
                                                  ICLFeatures.Value, [
-  ProcIntelICL,
   FeatureHasFastGather
 ]>;
 def : IcelakeClientProc<"icelake-client">;
 
 class IcelakeServerProc<string Name> : ProcModel<Name, SkylakeServerModel,
                                                  ICLFeatures.Value, [
-  ProcIntelICX,
   FeaturePCONFIG,
   FeatureWBNOINVD,
   FeatureHasFastGather
@@ -992,7 +986,8 @@ def : ProcessorModel<"btver2", BtVer2Model, [
   FeatureLAHFSAHF,
   FeatureFast15ByteNOP,
   FeatureFastBEXTR,
-  FeatureFastPartialYMMorZMMWrite
+  FeatureFastPartialYMMorZMMWrite,
+  FeatureFastHorizontalOps
 ]>;
 
 // Bulldozer

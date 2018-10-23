@@ -3712,9 +3712,31 @@ bool SelectionDAG::isKnownNeverNaN(SDValue Op, bool SNaN, unsigned Depth) const 
     // TODO: Refine on operand
     return false;
   }
+  case ISD::FMINNUM:
+  case ISD::FMAXNUM: {
+    // Only one needs to be known not-nan, since it will be returned if the
+    // other ends up being one.
+    return isKnownNeverNaN(Op.getOperand(0), SNaN, Depth + 1) ||
+           isKnownNeverNaN(Op.getOperand(1), SNaN, Depth + 1);
+  }
+  case ISD::FMINNUM_IEEE:
+  case ISD::FMAXNUM_IEEE: {
+    if (SNaN)
+      return true;
+    // This can return a NaN if either operand is an sNaN, or if both operands
+    // are NaN.
+    return (isKnownNeverNaN(Op.getOperand(0), false, Depth + 1) &&
+            isKnownNeverSNaN(Op.getOperand(1), Depth + 1)) ||
+           (isKnownNeverNaN(Op.getOperand(1), false, Depth + 1) &&
+            isKnownNeverSNaN(Op.getOperand(0), Depth + 1));
+  }
+  case ISD::FMINNAN:
+  case ISD::FMAXNAN: {
+    // TODO: Does this quiet or return the origina NaN as-is?
+    return isKnownNeverNaN(Op.getOperand(0), SNaN, Depth + 1) &&
+           isKnownNeverNaN(Op.getOperand(1), SNaN, Depth + 1);
 
-  // TODO: Handle FMINNUM/FMAXNUM/FMINNAN/FMAXNAN when there is an agreement on
-  // what they should do.
+  }
   case ISD::EXTRACT_VECTOR_ELT: {
     return isKnownNeverNaN(Op.getOperand(0), SNaN, Depth + 1);
   }
@@ -8211,7 +8233,7 @@ bool llvm::isBitwiseNot(SDValue V) {
   return C && C->isAllOnesValue();
 }
 
-ConstantSDNode *llvm::isConstOrConstSplat(SDValue N) {
+ConstantSDNode *llvm::isConstOrConstSplat(SDValue N, bool AllowUndefs) {
   if (ConstantSDNode *CN = dyn_cast<ConstantSDNode>(N))
     return CN;
 
@@ -8220,9 +8242,7 @@ ConstantSDNode *llvm::isConstOrConstSplat(SDValue N) {
     ConstantSDNode *CN = BV->getConstantSplatNode(&UndefElements);
 
     // BuildVectors can truncate their operands. Ignore that case here.
-    // FIXME: We blindly ignore splats which include undef which is overly
-    // pessimistic.
-    if (CN && UndefElements.none() &&
+    if (CN && (UndefElements.none() || AllowUndefs) &&
         CN->getValueType(0) == N.getValueType().getScalarType())
       return CN;
   }
@@ -8230,15 +8250,14 @@ ConstantSDNode *llvm::isConstOrConstSplat(SDValue N) {
   return nullptr;
 }
 
-ConstantFPSDNode *llvm::isConstOrConstSplatFP(SDValue N) {
+ConstantFPSDNode *llvm::isConstOrConstSplatFP(SDValue N, bool AllowUndefs) {
   if (ConstantFPSDNode *CN = dyn_cast<ConstantFPSDNode>(N))
     return CN;
 
   if (BuildVectorSDNode *BV = dyn_cast<BuildVectorSDNode>(N)) {
     BitVector UndefElements;
     ConstantFPSDNode *CN = BV->getConstantFPSplatNode(&UndefElements);
-
-    if (CN && UndefElements.none())
+    if (CN && (UndefElements.none() || AllowUndefs))
       return CN;
   }
 

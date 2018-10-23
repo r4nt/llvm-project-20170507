@@ -52,6 +52,8 @@ enum Style {
 
 class X86Subtarget final : public X86GenSubtargetInfo {
 public:
+  // NOTE: Do not add anything new to this list. Coarse, CPU name based flags
+  // are not a good idea. We should be migrating away from these.
   enum X86ProcFamilyEnum {
     Others,
     IntelAtom,
@@ -59,14 +61,7 @@ public:
     IntelGLM,
     IntelGLP,
     IntelTRM,
-    IntelHaswell,
-    IntelBroadwell,
-    IntelSkylake,
     IntelKNL,
-    IntelSKX,
-    IntelCannonlake,
-    IntelIcelakeClient,
-    IntelIcelakeServer,
   };
 
 protected:
@@ -388,6 +383,9 @@ protected:
   /// Processor has a single uop BEXTR implementation.
   bool HasFastBEXTR = false;
 
+  /// Try harder to combine to horizontal vector ops if they are fast.
+  bool HasFastHorizontalOps = false;
+
   /// Use a retpoline thunk rather than indirect calls to block speculative
   /// execution.
   bool UseRetpolineIndirectCalls = false;
@@ -418,6 +416,9 @@ protected:
 
   /// Indicates target prefers 256 bit instructions.
   bool Prefer256Bit = false;
+
+  /// Threeway branch is profitable in this subtarget.
+  bool ThreewayBranchProfitable = false;
 
   /// What processor and OS we're targeting.
   Triple TargetTriple;
@@ -633,6 +634,7 @@ public:
   bool hasFastLZCNT() const { return HasFastLZCNT; }
   bool hasFastSHLDRotate() const { return HasFastSHLDRotate; }
   bool hasFastBEXTR() const { return HasFastBEXTR; }
+  bool hasFastHorizontalOps() const { return HasFastHorizontalOps; }
   bool hasMacroFusion() const { return HasMacroFusion; }
   bool hasERMSB() const { return HasERMSB; }
   bool hasSlowDivide32() const { return HasSlowDivide32; }
@@ -662,6 +664,7 @@ public:
   bool hasWAITPKG() const { return HasWAITPKG; }
   bool hasPCONFIG() const { return HasPCONFIG; }
   bool hasSGX() const { return HasSGX; }
+  bool threewayBranchProfitable() const { return ThreewayBranchProfitable; }
   bool hasINVPCID() const { return HasINVPCID; }
   bool useRetpolineIndirectCalls() const { return UseRetpolineIndirectCalls; }
   bool useRetpolineIndirectBranches() const {

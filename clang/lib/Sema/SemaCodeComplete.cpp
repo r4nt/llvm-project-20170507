@@ -1731,6 +1731,8 @@ static void AddOrdinaryNameResults(Sema::ParserCompletionContext CCC,
         Builder.AddChunk(CodeCompletionString::CK_HorizontalSpace);
         Builder.AddPlaceholderChunk("declaration");
         Results.AddResult(Result(Builder.TakeString()));
+      } else {
+        Results.AddResult(Result("template", CodeCompletionResult::RK_Keyword));
       }
     }
 
@@ -1805,6 +1807,8 @@ static void AddOrdinaryNameResults(Sema::ParserCompletionContext CCC,
       Builder.AddPlaceholderChunk("parameters");
       Builder.AddChunk(CodeCompletionString::CK_RightAngle);
       Results.AddResult(Result(Builder.TakeString()));
+    } else {
+      Results.AddResult(Result("template", CodeCompletionResult::RK_Keyword));
     }
 
     AddStorageSpecifiers(CCC, SemaRef.getLangOpts(), Results);
@@ -1881,7 +1885,8 @@ static void AddOrdinaryNameResults(Sema::ParserCompletionContext CCC,
     }
 
     // Switch-specific statements.
-    if (!SemaRef.getCurFunction()->SwitchStack.empty()) {
+    if (SemaRef.getCurFunction() &&
+        !SemaRef.getCurFunction()->SwitchStack.empty()) {
       // case expression:
       Builder.AddTypedTextChunk("case");
       Builder.AddChunk(CodeCompletionString::CK_HorizontalSpace);
@@ -3681,13 +3686,20 @@ void Sema::CodeCompleteOrdinaryName(Scope *S,
   }
 
   // If we are in a C++ non-static member function, check the qualifiers on
-  // the member function to filter/prioritize the results list.
-  if (CXXMethodDecl *CurMethod = dyn_cast<CXXMethodDecl>(CurContext))
-    if (CurMethod->isInstance())
+  // the member function to filter/prioritize the results list and set the
+  // context to the record context so that accessibility check in base class
+  // works correctly.
+  RecordDecl *MemberCompletionRecord = nullptr;
+  if (CXXMethodDecl *CurMethod = dyn_cast<CXXMethodDecl>(CurContext)) {
+    if (CurMethod->isInstance()) {
       Results.setObjectTypeQualifiers(
                       Qualifiers::fromCVRMask(CurMethod->getTypeQualifiers()));
+      MemberCompletionRecord = CurMethod->getParent();
+    }
+  }
 
-  CodeCompletionDeclConsumer Consumer(Results, CurContext);
+  CodeCompletionDeclConsumer Consumer(Results, CurContext, /*FixIts=*/{},
+                                      MemberCompletionRecord);
   LookupVisibleDecls(S, LookupOrdinaryName, Consumer,
                      CodeCompleter->includeGlobals(),
                      CodeCompleter->loadExternal());
@@ -8151,7 +8163,7 @@ void Sema::CodeCompleteIncludedFile(llvm::StringRef Dir, bool Angled) {
     std::error_code EC;
     unsigned Count = 0;
     for (auto It = FS->dir_begin(Dir, EC);
-         !EC && It != vfs::directory_iterator(); It.increment(EC)) {
+         !EC && It != llvm::vfs::directory_iterator(); It.increment(EC)) {
       if (++Count == 2500) // If we happen to hit a huge directory,
         break;             // bail out early so we're not too slow.
       StringRef Filename = llvm::sys::path::filename(It->path());

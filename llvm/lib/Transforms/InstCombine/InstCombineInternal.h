@@ -82,8 +82,8 @@ class User;
 ///   5 -> Other instructions
 static inline unsigned getComplexity(Value *V) {
   if (isa<Instruction>(V)) {
-    if (isa<CastInst>(V) || BinaryOperator::isNeg(V) ||
-        BinaryOperator::isFNeg(V) || BinaryOperator::isNot(V))
+    if (isa<CastInst>(V) || match(V, m_Neg(m_Value())) ||
+        match(V, m_Not(m_Value())) || match(V, m_FNeg(m_Value())))
       return 4;
     return 5;
   }
@@ -805,7 +805,7 @@ private:
                                     APInt &UndefElts, unsigned Depth = 0);
 
   /// Canonicalize the position of binops relative to shufflevector.
-  Instruction *foldShuffledBinop(BinaryOperator &Inst);
+  Instruction *foldVectorBinop(BinaryOperator &Inst);
 
   /// Given a binary operator, cast instruction, or select which has a PHI node
   /// as operand #0, see if we can fold the instruction into the PHI (which is

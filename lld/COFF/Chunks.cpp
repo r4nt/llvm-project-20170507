@@ -590,6 +590,13 @@ void SectionChunk::replace(SectionChunk *Other) {
   Other->Live = false;
 }
 
+uint32_t SectionChunk::getSectionNumber() const {
+  DataRefImpl R;
+  R.p = reinterpret_cast<uintptr_t>(Header);
+  SectionRef S(R, File->getCOFFObj());
+  return S.getIndex() + 1;
+}
+
 CommonChunk::CommonChunk(const COFFSymbolRef S) : Sym(S) {
   // Common symbols are aligned on natural boundaries up to 32 bytes.
   // This is what MSVC link.exe does.
@@ -668,9 +675,7 @@ void LocalImportChunk::getBaserels(std::vector<Baserel> *Res) {
   Res->emplace_back(getRVA());
 }
 
-size_t LocalImportChunk::getSize() const {
-  return Config->is64() ? 8 : 4;
-}
+size_t LocalImportChunk::getSize() const { return Config->Wordsize; }
 
 void LocalImportChunk::writeTo(uint8_t *Buf) const {
   if (Config->is64()) {
@@ -834,9 +839,7 @@ void MergeChunk::writeTo(uint8_t *Buf) const {
 }
 
 // MinGW specific.
-size_t AbsolutePointerChunk::getSize() const {
-  return Config->is64() ? 8 : 4;
-}
+size_t AbsolutePointerChunk::getSize() const { return Config->Wordsize; }
 
 void AbsolutePointerChunk::writeTo(uint8_t *Buf) const {
   if (Config->is64()) {

@@ -8012,6 +8012,8 @@ OMPClause *Sema::ActOnOpenMPSingleExprClause(OpenMPClauseKind Kind, Expr *Expr,
   case OMPC_is_device_ptr:
   case OMPC_unified_address:
   case OMPC_unified_shared_memory:
+  case OMPC_reverse_offload:
+  case OMPC_dynamic_allocators:
     llvm_unreachable("Clause is not allowed.");
   }
   return Res;
@@ -8535,6 +8537,8 @@ static OpenMPDirectiveKind getOpenMPCaptureRegionForClause(
   case OMPC_is_device_ptr:
   case OMPC_unified_address:
   case OMPC_unified_shared_memory:
+  case OMPC_reverse_offload:
+  case OMPC_dynamic_allocators:
     llvm_unreachable("Unexpected OpenMP clause.");
   }
   return CaptureRegion;
@@ -8854,6 +8858,8 @@ OMPClause *Sema::ActOnOpenMPSimpleClause(
   case OMPC_is_device_ptr:
   case OMPC_unified_address:
   case OMPC_unified_shared_memory:
+  case OMPC_reverse_offload:
+  case OMPC_dynamic_allocators:
     llvm_unreachable("Clause is not allowed.");
   }
   return Res;
@@ -9012,6 +9018,8 @@ OMPClause *Sema::ActOnOpenMPSingleExprWithArgClause(
   case OMPC_is_device_ptr:
   case OMPC_unified_address:
   case OMPC_unified_shared_memory:
+  case OMPC_reverse_offload:
+  case OMPC_dynamic_allocators:
     llvm_unreachable("Clause is not allowed.");
   }
   return Res;
@@ -9173,6 +9181,12 @@ OMPClause *Sema::ActOnOpenMPClause(OpenMPClauseKind Kind,
   case OMPC_unified_shared_memory:
     Res = ActOnOpenMPUnifiedSharedMemoryClause(StartLoc, EndLoc);
     break;
+  case OMPC_reverse_offload:
+    Res = ActOnOpenMPReverseOffloadClause(StartLoc, EndLoc);
+    break;
+  case OMPC_dynamic_allocators:
+    Res = ActOnOpenMPDynamicAllocatorsClause(StartLoc, EndLoc);
+    break;
   case OMPC_if:
   case OMPC_final:
   case OMPC_num_threads:
@@ -9281,6 +9295,16 @@ OMPClause *Sema::ActOnOpenMPUnifiedAddressClause(SourceLocation StartLoc,
 OMPClause *Sema::ActOnOpenMPUnifiedSharedMemoryClause(SourceLocation StartLoc,
                                                       SourceLocation EndLoc) {
   return new (Context) OMPUnifiedSharedMemoryClause(StartLoc, EndLoc);
+}
+
+OMPClause *Sema::ActOnOpenMPReverseOffloadClause(SourceLocation StartLoc,
+                                                 SourceLocation EndLoc) {
+  return new (Context) OMPReverseOffloadClause(StartLoc, EndLoc);
+}
+
+OMPClause *Sema::ActOnOpenMPDynamicAllocatorsClause(SourceLocation StartLoc,
+                                                    SourceLocation EndLoc) {
+  return new (Context) OMPDynamicAllocatorsClause(StartLoc, EndLoc);
 }
 
 OMPClause *Sema::ActOnOpenMPVarListClause(
@@ -9392,6 +9416,8 @@ OMPClause *Sema::ActOnOpenMPVarListClause(
   case OMPC_uniform:
   case OMPC_unified_address:
   case OMPC_unified_shared_memory:
+  case OMPC_reverse_offload:
+  case OMPC_dynamic_allocators:
     llvm_unreachable("Clause is not allowed.");
   }
   return Res;
