@@ -725,12 +725,16 @@ protected:
   bool formatChildren(LineState &State, bool NewLine, bool DryRun,
                       unsigned &Penalty) {
     const FormatToken *LBrace = State.NextToken->getPreviousNonComment();
+    bool HasLBrace = LBrace && LBrace->is(tok::l_brace) &&
+        LBrace->BlockKind == BK_Block;
     FormatToken &Previous = *State.NextToken->Previous;
-    if (!LBrace || LBrace->isNot(tok::l_brace) ||
-        LBrace->BlockKind != BK_Block || Previous.Children.size() == 0)
+    llvm::errs() << "LBRACE: " << LBrace->MacroID << " " << LBrace->TokenText << " " << Previous.Children.size() << "\n";
+    if (Previous.Children.size() == 0 || 
+        (!HasLBrace && !LBrace->MacroID))
       // The previous token does not open a block. Nothing to do. We don't
       // assert so that we can simply call this function for all tokens.
       return true;
+    //ssert(false);
 
     if (NewLine) {
       int AdditionalIndent = State.Stack.back().Indent -

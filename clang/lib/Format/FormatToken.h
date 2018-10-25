@@ -315,6 +315,8 @@ struct FormatToken {
   MacroState Macro = MS_None;
 
   llvm::SmallVector<FormatToken*, 1> ExpandedFrom;
+  FormatToken *MacroCallID = nullptr;
+
   //FormatToken *ExpandedFrom = nullptr;
   bool StartOfExpansion = false;
   int EndOfExpansion = 0;
