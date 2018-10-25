@@ -60,11 +60,12 @@ LLVM_ATTRIBUTE_UNUSED static void printDebugInfo(const UnwrappedLine &Line,
              CE = I->Children.end();
          CI != CE; ++CI) {
       llvm::dbgs() << "\n";
-      printDebugInfo(*CI, (Prefix + "> ").str());
+      printDebugInfo(*CI, (Prefix + "  ").str());
       NewLine = true;
     }
   }
-  llvm::dbgs() << "\n";
+  if (!NewLine)
+    llvm::dbgs() << "\n";
 }
 
 class ScopedDeclarationState {
@@ -2667,7 +2668,7 @@ public:
 
   void expand(FormatToken *Token) {
     if (Token->StartOfExpansion) {
-      if (!Stack.empty() && Token->Macro != MS_Hidden)
+      if (!Stack.empty())
         continueExpansion(Token);
       startExpansion(Token);
       continueExpansion(Token);
@@ -2710,6 +2711,10 @@ public:
     //assert(Stack.size() <= Token->ExpandedFrom.size());
     if (Stack.size() < Token->ExpandedFrom.size()) {
       llvm::errs() << "Skipping (wrong level): " << Token->TokenText << "\n";
+      return;
+    }
+    if (Token->Macro == MS_None && !EParens.empty() && Token->is(tok::comma)) {
+      push(Token, EParens.back());
       return;
     }
     if (Token->Macro == MS_None && !EParens.empty() &&
@@ -2764,7 +2769,7 @@ public:
     llvm::errs() << "Stack: " << Stack.size() << "\n";
     llvm::errs() << "Looking for: " << Token->TokenText << " " << Token->Macro
                  << "\n";
-    if (Token->Macro == MS_Hidden) {
+    if (Token->Macro == MS_Hidden && Stack.size() == Token->ExpandedFrom.size()) {
       assert(!Current->Tokens.empty());
       ByToken[Token] = Current->Tokens.back()->Tok;
       return;
