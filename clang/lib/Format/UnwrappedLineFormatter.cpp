@@ -728,7 +728,7 @@ protected:
     bool HasLBrace = LBrace && LBrace->is(tok::l_brace) &&
         LBrace->BlockKind == BK_Block;
     FormatToken &Previous = *State.NextToken->Previous;
-    llvm::errs() << "LBRACE: " << LBrace->MacroID << " " << LBrace->TokenText << " " << Previous.Children.size() << "\n";
+    //llvm::errs() << "LBRACE: " << LBrace->MacroID << " " << LBrace->TokenText << " " << Previous.Children.size() << "\n";
     if (Previous.Children.size() == 0 || 
         (!HasLBrace && !LBrace->MacroID))
       // The previous token does not open a block. Nothing to do. We don't
@@ -745,7 +745,11 @@ protected:
                                  /*FixBadIndentation=*/true);
       return true;
     }
-
+//auto rp = [](int line) -> bool {
+//  llvm::errs() << "false " << line << "\n";
+//  return false;
+//};
+//#define false rp(__LINE__)
     if (Previous.Children[0]->First->MustBreakBefore)
       return false;
 
@@ -767,7 +771,7 @@ protected:
     if (Style.ColumnLimit > 0 &&
         Child->Last->TotalLength + State.Column + 2 > Style.ColumnLimit)
       return false;
-
+//#undef false
     if (!DryRun) {
       Whitespaces->replaceWhitespace(
           *Child->First, /*Newlines=*/0, /*Spaces=*/1,
@@ -979,8 +983,9 @@ private:
 
     StateNode *Node = new (Allocator.Allocate())
         StateNode(PreviousNode->State, NewLine, PreviousNode);
-    if (!formatChildren(Node->State, NewLine, /*DryRun=*/true, Penalty))
+    if (!formatChildren(Node->State, NewLine, /*DryRun=*/true, Penalty)) {
       return;
+    }
 
     Penalty += Indenter->addTokenToState(Node->State, NewLine, true);
 

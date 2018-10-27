@@ -1095,8 +1095,10 @@ public:
         if (isClosureImportStatement(*CurrentToken))
           ImportStatement = true;
       }
-      if (!consumeToken())
-        return LT_Invalid;
+      if (!consumeToken()) {
+        llvm::errs() << "Marking as invalid...";
+        return LT_Other;
+      }
     }
     if (KeywordVirtualFound)
       return LT_VirtualFunctionDecl;
