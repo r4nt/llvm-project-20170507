@@ -299,6 +299,7 @@ void SymbolRelevanceSignals::merge(const CodeCompletionResult &SemaCCResult) {
                               : 0.6;
     SemaFileProximityScore = std::max(DeclProximity, SemaFileProximityScore);
     IsInstanceMember |= isInstanceMember(SemaCCResult.Declaration);
+    InBaseClass |= SemaCCResult.InBaseClass;
   }
 
   // Declarations are scoped, others (like macros) are assumed global.
@@ -372,12 +373,15 @@ float SymbolRelevanceSignals::evaluate() const {
   if (!IsInstanceMember &&
       (Context == CodeCompletionContext::CCC_DotMemberAccess ||
        Context == CodeCompletionContext::CCC_ArrowMemberAccess)) {
-    Score *= 0.5;
+    Score *= 0.2f;
   }
+
+  if (InBaseClass)
+    Score *= 0.5f;
 
   // Penalize for FixIts.
   if (NeedsFixIts)
-    Score *= 0.5;
+    Score *= 0.5f;
 
   return Score;
 }

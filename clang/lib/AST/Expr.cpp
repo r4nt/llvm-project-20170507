@@ -1446,7 +1446,7 @@ UnaryExprOrTypeTraitExpr::UnaryExprOrTypeTraitExpr(
 
   // Check to see if we are in the situation where alignof(decl) should be
   // dependent because decl's alignment is dependent.
-  if (ExprKind == UETT_AlignOf) {
+  if (ExprKind == UETT_AlignOf || ExprKind == UETT_PreferredAlignOf) {
     if (!isValueDependent() || !isInstantiationDependent()) {
       E = E->IgnoreParens();
 
@@ -1641,8 +1641,7 @@ bool CastExpr::CastConsistency() const {
   case CK_ARCConsumeObject:
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
-  case CK_ZeroToOCLEvent:
-  case CK_ZeroToOCLQueue:
+  case CK_ZeroToOCLOpaqueType:
   case CK_IntToOCLSampler:
   case CK_FixedPointCast:
     assert(!getType()->isBooleanType() && "unheralded conversion to bool");
@@ -1662,6 +1661,7 @@ bool CastExpr::CastConsistency() const {
   case CK_LValueBitCast:            // -> bool&
   case CK_UserDefinedConversion:    // operator bool()
   case CK_BuiltinFnToFnPtr:
+  case CK_FixedPointToBoolean:
   CheckNoBasePath:
     assert(path_empty() && "Cast kind should not have a base path!");
     break;

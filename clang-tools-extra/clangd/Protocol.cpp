@@ -210,8 +210,8 @@ bool fromJSON(const json::Value &Params, ClientCapabilities &R) {
     if (auto *Diagnostics = TextDocument->getObject("publishDiagnostics")) {
       if (auto CategorySupport = Diagnostics->getBoolean("categorySupport"))
         R.DiagnosticCategory = *CategorySupport;
-      if (auto ClangdFixSupport = Diagnostics->getBoolean("clangdFixSupport"))
-        R.DiagnosticFixes = *ClangdFixSupport;
+      if (auto CodeActions = Diagnostics->getBoolean("codeActionsInline"))
+        R.DiagnosticFixes = *CodeActions;
     }
     if (auto *Completion = TextDocument->getObject("completion")) {
       if (auto *Item = Completion->getObject("completionItem")) {
@@ -348,8 +348,10 @@ json::Value toJSON(const Diagnostic &D) {
       {"severity", D.severity},
       {"message", D.message},
   };
-  // FIXME: this should be used for publishDiagnostics.
-  // FIXME: send category and fixes when appropriate.
+  if (D.category)
+    Diag["category"] = *D.category;
+  if (D.codeActions)
+    Diag["codeActions"] = D.codeActions;
   return std::move(Diag);
 }
 
@@ -358,6 +360,7 @@ bool fromJSON(const json::Value &Params, Diagnostic &R) {
   if (!O || !O.map("range", R.range) || !O.map("message", R.message))
     return false;
   O.map("severity", R.severity);
+  O.map("category", R.category);
   return true;
 }
 
@@ -660,20 +663,22 @@ bool fromJSON(const json::Value &Params, ClangdCompileCommand &CDbUpdate) {
          O.map("compilationCommand", CDbUpdate.compilationCommand);
 }
 
-bool fromJSON(const json::Value &Params,
-              ClangdConfigurationParamsChange &CCPC) {
+bool fromJSON(const json::Value &Params, ConfigurationSettings &S) {
   json::ObjectMapper O(Params);
-  return O &&
-         O.map("compilationDatabaseChanges", CCPC.compilationDatabaseChanges);
+  if (!O)
+    return true; // 'any' type in LSP.
+  O.map("compilationDatabaseChanges", S.compilationDatabaseChanges);
+  return true;
 }
 
-bool fromJSON(const json::Value &Params, ClangdInitializationOptions &Opts) {
-  if (!fromJSON(Params, Opts.ParamsChange)) {
-    return false;
-  }
-
+bool fromJSON(const json::Value &Params, InitializationOptions &Opts) {
   json::ObjectMapper O(Params);
-  return O && O.map("compilationDatabasePath", Opts.compilationDatabasePath);
+  if (!O)
+    return true; // 'any' type in LSP.
+
+  fromJSON(Params, Opts.ConfigSettings);
+  O.map("compilationDatabasePath", Opts.compilationDatabasePath);
+  return true;
 }
 
 bool fromJSON(const json::Value &Params, ReferenceParams &R) {
