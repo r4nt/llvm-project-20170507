@@ -3036,7 +3036,7 @@ static void ConvertUTF8ToWideString(unsigned CharByteWidth, StringRef Source,
 }
 
 ExprResult Sema::BuildPredefinedExpr(SourceLocation Loc,
-                                     PredefinedExpr::IdentType IT) {
+                                     PredefinedExpr::IdentKind IK) {
   // Pick the current block, lambda, captured statement or function.
   Decl *currentDecl = nullptr;
   if (const BlockScopeInfo *BSI = getCurBlock())
@@ -3060,11 +3060,11 @@ ExprResult Sema::BuildPredefinedExpr(SourceLocation Loc,
   else {
     // Pre-defined identifiers are of type char[x], where x is the length of
     // the string.
-    auto Str = PredefinedExpr::ComputeName(IT, currentDecl);
+    auto Str = PredefinedExpr::ComputeName(IK, currentDecl);
     unsigned Length = Str.length();
 
     llvm::APInt LengthI(32, Length + 1);
-    if (IT == PredefinedExpr::LFunction || IT == PredefinedExpr::LFuncSig) {
+    if (IK == PredefinedExpr::LFunction || IK == PredefinedExpr::LFuncSig) {
       ResTy =
           Context.adjustStringLiteralBaseType(Context.WideCharTy.withConst());
       SmallString<32> RawChars;
@@ -3083,24 +3083,24 @@ ExprResult Sema::BuildPredefinedExpr(SourceLocation Loc,
     }
   }
 
-  return new (Context) PredefinedExpr(Loc, ResTy, IT, SL);
+  return PredefinedExpr::Create(Context, Loc, ResTy, IK, SL);
 }
 
 ExprResult Sema::ActOnPredefinedExpr(SourceLocation Loc, tok::TokenKind Kind) {
-  PredefinedExpr::IdentType IT;
+  PredefinedExpr::IdentKind IK;
 
   switch (Kind) {
   default: llvm_unreachable("Unknown simple primary expr!");
-  case tok::kw___func__: IT = PredefinedExpr::Func; break; // [C99 6.4.2.2]
-  case tok::kw___FUNCTION__: IT = PredefinedExpr::Function; break;
-  case tok::kw___FUNCDNAME__: IT = PredefinedExpr::FuncDName; break; // [MS]
-  case tok::kw___FUNCSIG__: IT = PredefinedExpr::FuncSig; break; // [MS]
-  case tok::kw_L__FUNCTION__: IT = PredefinedExpr::LFunction; break; // [MS]
-  case tok::kw_L__FUNCSIG__: IT = PredefinedExpr::LFuncSig; break; // [MS]
-  case tok::kw___PRETTY_FUNCTION__: IT = PredefinedExpr::PrettyFunction; break;
+  case tok::kw___func__: IK = PredefinedExpr::Func; break; // [C99 6.4.2.2]
+  case tok::kw___FUNCTION__: IK = PredefinedExpr::Function; break;
+  case tok::kw___FUNCDNAME__: IK = PredefinedExpr::FuncDName; break; // [MS]
+  case tok::kw___FUNCSIG__: IK = PredefinedExpr::FuncSig; break; // [MS]
+  case tok::kw_L__FUNCTION__: IK = PredefinedExpr::LFunction; break; // [MS]
+  case tok::kw_L__FUNCSIG__: IK = PredefinedExpr::LFuncSig; break; // [MS]
+  case tok::kw___PRETTY_FUNCTION__: IK = PredefinedExpr::PrettyFunction; break;
   }
 
-  return BuildPredefinedExpr(Loc, IT);
+  return BuildPredefinedExpr(Loc, IK);
 }
 
 ExprResult Sema::ActOnCharacterConstant(const Token &Tok, Scope *UDLScope) {
@@ -7883,7 +7883,7 @@ Sema::CheckAssignmentConstraints(QualType LHSType, ExprResult &RHS,
     }
 
     // id -> T^
-    if (getLangOpts().ObjC1 && RHSType->isObjCIdType()) {
+    if (getLangOpts().ObjC && RHSType->isObjCIdType()) {
       Kind = CK_AnyPointerToBlockPointerCast;
       return Compatible;
     }
@@ -8192,7 +8192,7 @@ Sema::CheckSingleAssignmentConstraints(QualType LHSType, ExprResult &CallerRHS,
       if (!Diagnose)
         return Incompatible;
     }
-    if (getLangOpts().ObjC1 &&
+    if (getLangOpts().ObjC &&
         (CheckObjCBridgeRelatedConversions(E->getBeginLoc(), LHSType,
                                            E->getType(), E, Diagnose) ||
          ConversionToObjCStringLiteralCheck(LHSType, E, Diagnose))) {
@@ -8723,6 +8723,32 @@ static void checkArithmeticNull(Sema &S, ExprResult &LHS, ExprResult &RHS,
       << LHS.get()->getSourceRange() << RHS.get()->getSourceRange();
 }
 
+static void DiagnoseDivisionSizeofPointer(Sema &S, Expr *LHS, Expr *RHS,
+                                          SourceLocation Loc) {
+  const auto *LUE = dyn_cast<UnaryExprOrTypeTraitExpr>(LHS);
+  const auto *RUE = dyn_cast<UnaryExprOrTypeTraitExpr>(RHS);
+  if (!LUE || !RUE)
+    return;
+  if (LUE->getKind() != UETT_SizeOf || LUE->isArgumentType() ||
+      RUE->getKind() != UETT_SizeOf)
+    return;
+
+  QualType LHSTy = LUE->getArgumentExpr()->IgnoreParens()->getType();
+  QualType RHSTy;
+
+  if (RUE->isArgumentType())
+    RHSTy = RUE->getArgumentType();
+  else
+    RHSTy = RUE->getArgumentExpr()->IgnoreParens()->getType();
+
+  if (!LHSTy->isPointerType() || RHSTy->isPointerType())
+    return;
+  if (LHSTy->getPointeeType() != RHSTy)
+    return;
+
+  S.Diag(Loc, diag::warn_division_sizeof_ptr) << LHS << LHS->getSourceRange();
+}
+
 static void DiagnoseBadDivideOrRemainderValues(Sema& S, ExprResult &LHS,
                                                ExprResult &RHS,
                                                SourceLocation Loc, bool IsDiv) {
@@ -8753,8 +8779,10 @@ QualType Sema::CheckMultiplyDivideOperands(ExprResult &LHS, ExprResult &RHS,
 
   if (compType.isNull() || !compType->isArithmeticType())
     return InvalidOperands(Loc, LHS, RHS);
-  if (IsDiv)
+  if (IsDiv) {
     DiagnoseBadDivideOrRemainderValues(*this, LHS, RHS, Loc, IsDiv);
+    DiagnoseDivisionSizeofPointer(*this, LHS.get(), RHS.get(), Loc);
+  }
   return compType;
 }
 
@@ -10494,6 +10522,10 @@ QualType Sema::CheckCompareOperands(ExprResult &LHS, ExprResult &RHS,
   }
 
   if (getLangOpts().OpenCLVersion >= 200) {
+    if (LHSType->isClkEventT() && RHSType->isClkEventT()) {
+      return computeResultTy();
+    }
+
     if (LHSType->isQueueT() && RHSType->isQueueT()) {
       return computeResultTy();
     }
@@ -11944,7 +11976,7 @@ static void DiagnoseSelfAssignment(Sema &S, Expr *LHSExpr, Expr *RHSExpr,
 /// is usually indicative of introspection within the Objective-C pointer.
 static void checkObjCPointerIntrospection(Sema &S, ExprResult &L, ExprResult &R,
                                           SourceLocation OpLoc) {
-  if (!S.getLangOpts().ObjC1)
+  if (!S.getLangOpts().ObjC)
     return;
 
   const Expr *ObjCPointerExpr = nullptr, *OtherExpr = nullptr;
@@ -13735,7 +13767,7 @@ ExprResult Sema::ActOnGNUNullExpr(SourceLocation TokenLoc) {
 
 bool Sema::ConversionToObjCStringLiteralCheck(QualType DstType, Expr *&Exp,
                                               bool Diagnose) {
-  if (!getLangOpts().ObjC1)
+  if (!getLangOpts().ObjC)
     return false;
 
   const ObjCObjectPointerType *PT = DstType->getAs<ObjCObjectPointerType>();

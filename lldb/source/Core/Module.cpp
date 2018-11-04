@@ -171,10 +171,10 @@ Module::Module(const ModuleSpec &module_spec)
   }
 
   if (module_spec.GetFileSpec())
-    m_mod_time = FileSystem::GetModificationTime(module_spec.GetFileSpec());
+    m_mod_time = FileSystem::Instance().GetModificationTime(module_spec.GetFileSpec());
   else if (matching_module_spec.GetFileSpec())
     m_mod_time =
-        FileSystem::GetModificationTime(matching_module_spec.GetFileSpec());
+        FileSystem::Instance().GetModificationTime(matching_module_spec.GetFileSpec());
 
   // Copy the architecture from the actual spec if we got one back, else use
   // the one that was specified
@@ -219,7 +219,7 @@ Module::Module(const ModuleSpec &module_spec)
 Module::Module(const FileSpec &file_spec, const ArchSpec &arch,
                const ConstString *object_name, lldb::offset_t object_offset,
                const llvm::sys::TimePoint<> &object_mod_time)
-    : m_mod_time(FileSystem::GetModificationTime(file_spec)), m_arch(arch),
+    : m_mod_time(FileSystem::Instance().GetModificationTime(file_spec)), m_arch(arch),
       m_file(file_spec), m_object_offset(object_offset),
       m_object_mod_time(object_mod_time), m_file_has_changed(false),
       m_first_file_changed_log(false) {
@@ -569,7 +569,7 @@ uint32_t Module::ResolveSymbolContextForAddress(
 uint32_t Module::ResolveSymbolContextForFilePath(
     const char *file_path, uint32_t line, bool check_inlines,
     lldb::SymbolContextItem resolve_scope, SymbolContextList &sc_list) {
-  FileSpec file_spec(file_path, false);
+  FileSpec file_spec(file_path);
   return ResolveSymbolContextsForFileSpec(file_spec, line, check_inlines,
                                           resolve_scope, sc_list);
 }
@@ -1062,7 +1062,7 @@ void Module::SetFileSpecAndObjectName(const FileSpec &file,
   // Container objects whose paths do not specify a file directly can call this
   // function to correct the file and object names.
   m_file = file;
-  m_mod_time = FileSystem::GetModificationTime(file);
+  m_mod_time = FileSystem::Instance().GetModificationTime(file);
   m_object_name = object_name;
 }
 
@@ -1125,7 +1125,7 @@ void Module::ReportError(const char *format, ...) {
 bool Module::FileHasChanged() const {
   if (!m_file_has_changed)
     m_file_has_changed =
-        (FileSystem::GetModificationTime(m_file) != m_mod_time);
+        (FileSystem::Instance().GetModificationTime(m_file) != m_mod_time);
   return m_file_has_changed;
 }
 
@@ -1252,7 +1252,8 @@ ObjectFile *Module::GetObjectFile() {
                          GetFileSpec().GetFilename().AsCString(""));
       DataBufferSP data_sp;
       lldb::offset_t data_offset = 0;
-      const lldb::offset_t file_size = m_file.GetByteSize();
+      const lldb::offset_t file_size =
+          FileSystem::Instance().GetByteSize(m_file);
       if (file_size > m_object_offset) {
         m_did_load_objfile = true;
         m_objfile_sp = ObjectFile::FindPlugin(
@@ -1417,7 +1418,7 @@ void Module::PreloadSymbols() {
 }
 
 void Module::SetSymbolFileFileSpec(const FileSpec &file) {
-  if (!file.Exists())
+  if (!FileSystem::Instance().Exists(file))
     return;
   if (m_symfile_ap) {
     // Remove any sections in the unified section list that come from the
@@ -1536,7 +1537,8 @@ bool Module::LoadScriptingResourceInTarget(Target *target, Status &error,
       if (script_interpreter) {
         for (uint32_t i = 0; i < num_specs; ++i) {
           FileSpec scripting_fspec(file_specs.GetFileSpecAtIndex(i));
-          if (scripting_fspec && scripting_fspec.Exists()) {
+          if (scripting_fspec &&
+              FileSystem::Instance().Exists(scripting_fspec)) {
             if (should_load == eLoadScriptFromSymFileWarn) {
               if (feedback_stream)
                 feedback_stream->Printf(

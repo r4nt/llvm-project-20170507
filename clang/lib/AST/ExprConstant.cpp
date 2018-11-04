@@ -39,6 +39,7 @@
 #include "clang/AST/ASTLambda.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/OSLog.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/TypeLoc.h"
@@ -143,8 +144,8 @@ namespace {
     // If we're doing a variable assignment from e.g. malloc(N), there will
     // probably be a cast of some kind. In exotic cases, we might also see a
     // top-level ExprWithCleanups. Ignore them either way.
-    if (const auto *EC = dyn_cast<ExprWithCleanups>(E))
-      E = EC->getSubExpr()->IgnoreParens();
+    if (const auto *FE = dyn_cast<FullExpr>(E))
+      E = FE->getSubExpr()->IgnoreParens();
 
     if (const auto *Cast = dyn_cast<CastExpr>(E))
       E = Cast->getSubExpr()->IgnoreParens();
@@ -8126,6 +8127,12 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
     llvm_unreachable("unexpected EvalMode");
   }
 
+  case Builtin::BI__builtin_os_log_format_buffer_size: {
+    analyze_os_log::OSLogBufferLayout Layout;
+    analyze_os_log::computeOSLogBufferLayout(Info.Ctx, E, Layout);
+    return Success(Layout.size().getQuantity(), E);
+  }
+
   case Builtin::BI__builtin_bswap16:
   case Builtin::BI__builtin_bswap32:
   case Builtin::BI__builtin_bswap64: {
@@ -11062,6 +11069,9 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
     return
       CheckICE(cast<SubstNonTypeTemplateParmExpr>(E)->getReplacement(), Ctx);
 
+  case Expr::ConstantExprClass:
+    return CheckICE(cast<ConstantExpr>(E)->getSubExpr(), Ctx);
+
   case Expr::ParenExprClass:
     return CheckICE(cast<ParenExpr>(E)->getSubExpr(), Ctx);
   case Expr::GenericSelectionExprClass:
@@ -11140,9 +11150,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
     case UO_Imag:
       return CheckICE(Exp->getSubExpr(), Ctx);
     }
-
-    // OffsetOf falls through here.
-    LLVM_FALLTHROUGH;
+    llvm_unreachable("invalid unary operator class");
   }
   case Expr::OffsetOfExprClass: {
     // Note that per C99, offsetof must be an ICE. And AFAIK, using
@@ -11246,7 +11254,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
       return Worst(LHSResult, RHSResult);
     }
     }
-    LLVM_FALLTHROUGH;
+    llvm_unreachable("invalid binary operator kind");
   }
   case Expr::ImplicitCastExprClass:
   case Expr::CStyleCastExprClass:

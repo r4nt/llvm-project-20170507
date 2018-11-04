@@ -322,7 +322,6 @@ protected:
 
   // Used as options.
   bool EnableHugePrivateBuffer;
-  bool EnableVGPRSpilling;
   bool EnableLoadStoreOpt;
   bool EnableUnsafeDSOffsetFolding;
   bool EnableSIScheduler;
@@ -514,6 +513,10 @@ public:
 
   bool hasFMA() const {
     return FMA;
+  }
+
+  bool hasSwap() const {
+    return GFX9Insts;
   }
 
   TrapHandlerAbi getTrapHandlerAbi() const {
@@ -743,8 +746,6 @@ public:
 
   void overrideSchedPolicy(MachineSchedPolicy &Policy,
                            unsigned NumRegionInstrs) const override;
-
-  bool isVGPRSpillingEnabled(const Function &F) const;
 
   unsigned getMaxNumUserSGPRs() const {
     return 16;

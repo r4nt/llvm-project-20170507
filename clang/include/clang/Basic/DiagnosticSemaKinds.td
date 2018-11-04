@@ -851,6 +851,9 @@ def err_pragma_attribute_no_pop_eof : Error<"unterminated "
   "'#pragma clang attribute push' at end of file">;
 def note_pragma_attribute_applied_decl_here : Note<
   "when applied to this declaration">;
+def err_pragma_attr_attr_no_push : Error<
+  "'#pragma clang attribute' attribute with no matching "
+  "'#pragma clang attribute push'">;
 
 /// Objective-C parser diagnostics
 def err_duplicate_class_def : Error<
@@ -3290,6 +3293,10 @@ def warn_address_of_reference_null_compare : Warning<
   "%select{true|false}0">,
   InGroup<TautologicalUndefinedCompare>;
 def note_reference_is_return_value : Note<"%0 returns a reference">;
+
+def warn_division_sizeof_ptr : Warning<
+  "'%0' will return the size of the pointer, not the array itself">,
+  InGroup<DiagGroup<"sizeof-pointer-div">>;
 
 def note_function_warning_silence : Note<
     "prefix with the address-of operator to silence this warning">;
@@ -9463,10 +9470,9 @@ def ext_warn_gnu_final : ExtWarn<
   "__final is a GNU extension, consider using C++11 final">,
   InGroup<GccCompat>;
 
-def warn_shadow_field :
-  Warning<"non-static data member %0 of %1 shadows member inherited from "
-  "type %2">,
-  InGroup<ShadowField>, DefaultIgnore;
+def warn_shadow_field : Warning<
+  "%select{parameter|non-static data member}3 %0 %select{|of %1 }3shadows "
+  "member inherited from type %2">, InGroup<ShadowField>, DefaultIgnore;
 def note_shadow_field : Note<"declared here">;
 
 def err_multiversion_required_in_redecl : Error<

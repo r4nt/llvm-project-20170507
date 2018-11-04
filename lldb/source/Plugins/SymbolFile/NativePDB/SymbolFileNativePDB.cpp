@@ -49,6 +49,8 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/MemoryBuffer.h"
 
+#include "Plugins/Language/CPlusPlus/CPlusPlusNameParser.h"
+
 #include "PdbSymUid.h"
 #include "PdbUtil.h"
 #include "UdtRecordCompleter.h"
@@ -391,9 +393,13 @@ static PDB_SymType GetPdbSymType(TpiStream &tpi, TypeIndex ti) {
   // If this is an LF_MODIFIER, look through it to get the kind that it
   // modifies.  Note that it's not possible to have an LF_MODIFIER that
   // modifies another LF_MODIFIER, although this would handle that anyway.
-  ModifierRecord mr;
-  llvm::cantFail(TypeDeserializer::deserializeAs<ModifierRecord>(cvt, mr));
-  return GetPdbSymType(tpi, mr.ModifiedType);
+  return GetPdbSymType(tpi, LookThroughModifierRecord(cvt));
+}
+
+static bool IsCVarArgsFunction(llvm::ArrayRef<TypeIndex> args) {
+  if (args.empty())
+    return false;
+  return args.back() == TypeIndex::None();
 }
 
 static clang::TagTypeKind TranslateUdtKind(const TagRecord &cr) {
@@ -411,6 +417,32 @@ static clang::TagTypeKind TranslateUdtKind(const TagRecord &cr) {
   default:
     lldbassert(false && "Invalid tag record kind!");
     return clang::TTK_Struct;
+  }
+}
+
+static llvm::Optional<clang::CallingConv>
+TranslateCallingConvention(llvm::codeview::CallingConvention conv) {
+  using CC = llvm::codeview::CallingConvention;
+  switch (conv) {
+
+  case CC::NearC:
+  case CC::FarC:
+    return clang::CallingConv::CC_C;
+  case CC::NearPascal:
+  case CC::FarPascal:
+    return clang::CallingConv::CC_X86Pascal;
+  case CC::NearFast:
+  case CC::FarFast:
+    return clang::CallingConv::CC_X86FastCall;
+  case CC::NearStdCall:
+  case CC::FarStdCall:
+    return clang::CallingConv::CC_X86StdCall;
+  case CC::ThisCall:
+    return clang::CallingConv::CC_X86ThisCall;
+  case CC::NearVector:
+    return clang::CallingConv::CC_X86VectorCall;
+  default:
+    return llvm::None;
   }
 }
 
@@ -542,7 +574,6 @@ lldb::FunctionSP SymbolFileNativePDB::CreateFunction(PdbSymUid func_uid,
   PdbSymUid sig_uid =
       PdbSymUid::makeTypeSymId(PDB_SymType::FunctionSig, TypeIndex{0}, false);
   Mangled mangled(getSymbolName(sym_record));
-
   FunctionSP func_sp = std::make_shared<Function>(
       sc.comp_unit, func_uid.toOpaqueId(), sig_uid.toOpaqueId(), mangled,
       func_type, func_range);
@@ -563,7 +594,7 @@ SymbolFileNativePDB::CreateCompileUnit(const CompilandIndexItem &cci) {
 
   llvm::StringRef source_file_name =
       m_index->compilands().GetMainSourceFile(cci);
-  FileSpec fs(source_file_name, false);
+  FileSpec fs(source_file_name);
 
   CompUnitSP cu_sp =
       std::make_shared<CompileUnit>(m_obj_file->GetModule(), nullptr, fs,
@@ -600,6 +631,8 @@ lldb::TypeSP SymbolFileNativePDB::CreateModifierType(PdbSymUid type_uid,
 lldb::TypeSP SymbolFileNativePDB::CreatePointerType(
     PdbSymUid type_uid, const llvm::codeview::PointerRecord &pr) {
   TypeSP pointee = GetOrCreateType(pr.ReferentType);
+  if (!pointee)
+    return nullptr;
   CompilerType pointee_ct = pointee->GetForwardCompilerType();
   lldbassert(pointee_ct);
   Declaration decl;
@@ -641,6 +674,17 @@ lldb::TypeSP SymbolFileNativePDB::CreatePointerType(
 }
 
 lldb::TypeSP SymbolFileNativePDB::CreateSimpleType(TypeIndex ti) {
+  if (ti == TypeIndex::NullptrT()) {
+    PdbSymUid uid =
+        PdbSymUid::makeTypeSymId(PDB_SymType::BuiltinType, ti, false);
+    CompilerType ct = m_clang->GetBasicType(eBasicTypeNullPtr);
+    Declaration decl;
+    return std::make_shared<Type>(uid.toOpaqueId(), this,
+                                  ConstString("std::nullptr_t"), 0, nullptr,
+                                  LLDB_INVALID_UID, Type::eEncodingIsUID, decl,
+                                  ct, Type::eResolveStateFull);
+  }
+
   if (ti.getSimpleMode() != SimpleTypeMode::Direct) {
     PdbSymUid uid =
         PdbSymUid::makeTypeSymId(PDB_SymType::PointerType, ti, false);
@@ -672,7 +716,8 @@ lldb::TypeSP SymbolFileNativePDB::CreateSimpleType(TypeIndex ti) {
     return nullptr;
 
   lldb::BasicType bt = GetCompilerTypeForSimpleKind(ti.getSimpleKind());
-  lldbassert(bt != lldb::eBasicTypeInvalid);
+  if (bt == lldb::eBasicTypeInvalid)
+    return nullptr;
   CompilerType ct = m_clang->GetBasicType(bt);
   size_t size = GetTypeSizeForSimpleKind(ti.getSimpleKind());
 
@@ -688,10 +733,6 @@ lldb::TypeSP SymbolFileNativePDB::CreateSimpleType(TypeIndex ti) {
 lldb::TypeSP SymbolFileNativePDB::CreateClassStructUnion(
     PdbSymUid type_uid, llvm::StringRef name, size_t size,
     clang::TagTypeKind ttk, clang::MSInheritanceAttr::Spelling inheritance) {
-
-  // Some UDT with trival ctor has zero length. Just ignore.
-  if (size == 0)
-    return nullptr;
 
   // Ignore unnamed-tag UDTs.
   name = DropNameScope(name);
@@ -775,6 +816,68 @@ lldb::TypeSP SymbolFileNativePDB::CreateTagType(PdbSymUid type_uid,
       lldb_private::Type::eResolveStateForward);
 }
 
+TypeSP SymbolFileNativePDB::CreateArrayType(PdbSymUid type_uid,
+                                            const ArrayRecord &ar) {
+  TypeSP element_type = GetOrCreateType(ar.ElementType);
+  uint64_t element_count = ar.Size / element_type->GetByteSize();
+
+  CompilerType element_ct = element_type->GetFullCompilerType();
+
+  CompilerType array_ct =
+      m_clang->CreateArrayType(element_ct, element_count, false);
+
+  Declaration decl;
+  TypeSP array_sp = std::make_shared<lldb_private::Type>(
+      type_uid.toOpaqueId(), m_clang->GetSymbolFile(), ConstString(), ar.Size,
+      nullptr, LLDB_INVALID_UID, lldb_private::Type::eEncodingIsUID, decl,
+      array_ct, lldb_private::Type::eResolveStateFull);
+  array_sp->SetEncodingType(element_type.get());
+  return array_sp;
+}
+
+TypeSP SymbolFileNativePDB::CreateProcedureType(PdbSymUid type_uid,
+                                                const ProcedureRecord &pr) {
+  TpiStream &stream = m_index->tpi();
+  CVType args_cvt = stream.getType(pr.ArgumentList);
+  ArgListRecord args;
+  llvm::cantFail(
+      TypeDeserializer::deserializeAs<ArgListRecord>(args_cvt, args));
+
+  llvm::ArrayRef<TypeIndex> arg_indices = llvm::makeArrayRef(args.ArgIndices);
+  bool is_variadic = IsCVarArgsFunction(arg_indices);
+  if (is_variadic)
+    arg_indices = arg_indices.drop_back();
+
+  std::vector<CompilerType> arg_list;
+  arg_list.reserve(arg_list.size());
+
+  for (TypeIndex arg_index : arg_indices) {
+    TypeSP arg_sp = GetOrCreateType(arg_index);
+    if (!arg_sp)
+      return nullptr;
+    arg_list.push_back(arg_sp->GetFullCompilerType());
+  }
+
+  TypeSP return_type_sp = GetOrCreateType(pr.ReturnType);
+  if (!return_type_sp)
+    return nullptr;
+
+  llvm::Optional<clang::CallingConv> cc =
+      TranslateCallingConvention(pr.CallConv);
+  if (!cc)
+    return nullptr;
+
+  CompilerType return_ct = return_type_sp->GetFullCompilerType();
+  CompilerType func_sig_ast_type = m_clang->CreateFunctionType(
+      return_ct, arg_list.data(), arg_list.size(), is_variadic, 0, *cc);
+
+  Declaration decl;
+  return std::make_shared<lldb_private::Type>(
+      type_uid.toOpaqueId(), this, ConstString(), 0, nullptr, LLDB_INVALID_UID,
+      lldb_private::Type::eEncodingIsUID, decl, func_sig_ast_type,
+      lldb_private::Type::eResolveStateFull);
+}
+
 TypeSP SymbolFileNativePDB::CreateType(PdbSymUid type_uid) {
   const PdbTypeSymId &tsid = type_uid.asTypeSym();
   TypeIndex index(tsid.index);
@@ -817,6 +920,18 @@ TypeSP SymbolFileNativePDB::CreateType(PdbSymUid type_uid) {
     return CreateTagType(type_uid, ur);
   }
 
+  if (cvt.kind() == LF_ARRAY) {
+    ArrayRecord ar;
+    llvm::cantFail(TypeDeserializer::deserializeAs<ArrayRecord>(cvt, ar));
+    return CreateArrayType(type_uid, ar);
+  }
+
+  if (cvt.kind() == LF_PROCEDURE) {
+    ProcedureRecord pr;
+    llvm::cantFail(TypeDeserializer::deserializeAs<ProcedureRecord>(cvt, pr));
+    return CreateProcedureType(type_uid, pr);
+  }
+
   return nullptr;
 }
 
@@ -835,7 +950,7 @@ TypeSP SymbolFileNativePDB::CreateAndCacheType(PdbSymUid type_uid) {
       auto expected_full_ti = m_index->tpi().findFullDeclForForwardRef(ti);
       if (!expected_full_ti)
         llvm::consumeError(expected_full_ti.takeError());
-      else {
+      else if (*expected_full_ti != ti) {
         full_decl_uid = PdbSymUid::makeTypeSymId(
             type_uid.tag(), *expected_full_ti, type_id.is_ipi);
 
@@ -857,6 +972,8 @@ TypeSP SymbolFileNativePDB::CreateAndCacheType(PdbSymUid type_uid) {
 
   PdbSymUid best_uid = full_decl_uid ? *full_decl_uid : type_uid;
   TypeSP result = CreateType(best_uid);
+  if (!result)
+    return nullptr;
   m_types[best_uid.toOpaqueId()] = result;
   // If we had both a forward decl and a full decl, make both point to the new
   // type.
@@ -1256,7 +1373,7 @@ bool SymbolFileNativePDB::ParseCompileUnitSupportFiles(
   for (llvm::StringRef f : cci->m_file_list) {
     FileSpec::Style style =
         f.startswith("/") ? FileSpec::Style::posix : FileSpec::Style::windows;
-    FileSpec spec(f, false, style);
+    FileSpec spec(f, style);
     support_files.Append(spec);
   }
 
@@ -1442,6 +1559,25 @@ bool SymbolFileNativePDB::CompleteType(CompilerType &compiler_type) {
   auto types_iter = m_types.find(uid.toOpaqueId());
   lldbassert(types_iter != m_types.end());
 
+  if (cvt.kind() == LF_MODIFIER) {
+    TypeIndex unmodified_type = LookThroughModifierRecord(cvt);
+    cvt = m_index->tpi().getType(unmodified_type);
+    // LF_MODIFIERS usually point to forward decls, so this is the one case
+    // where we won't have been able to resolve a forward decl to a full decl
+    // earlier on.  So we need to do that now.
+    if (IsForwardRefUdt(cvt)) {
+      llvm::Expected<TypeIndex> expected_full_ti =
+          m_index->tpi().findFullDeclForForwardRef(unmodified_type);
+      if (!expected_full_ti) {
+        llvm::consumeError(expected_full_ti.takeError());
+        return false;
+      }
+      cvt = m_index->tpi().getType(*expected_full_ti);
+      lldbassert(!IsForwardRefUdt(cvt));
+      unmodified_type = *expected_full_ti;
+    }
+    uid = PdbSymUid::makeTypeSymId(uid.tag(), unmodified_type, false);
+  }
   TypeIndex field_list_ti = GetFieldListIndex(cvt);
   CVType field_list_cvt = m_index->tpi().getType(field_list_ti);
   if (field_list_cvt.kind() != LF_FIELDLIST)

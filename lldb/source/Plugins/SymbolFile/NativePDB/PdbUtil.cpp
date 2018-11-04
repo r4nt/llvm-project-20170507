@@ -92,6 +92,8 @@ PDB_SymType lldb_private::npdb::CVTypeToPDBType(TypeLeafKind kind) {
     return PDB_SymType::PointerType;
   case LF_ENUM:
     return PDB_SymType::Enum;
+  case LF_PROCEDURE:
+    return PDB_SymType::FunctionSig;
   default:
     lldbassert(false && "Invalid type record kind!");
   }
@@ -341,6 +343,13 @@ TypeIndex lldb_private::npdb::GetFieldListIndex(CVType cvt) {
   default:
     llvm_unreachable("Unreachable!");
   }
+}
+
+TypeIndex lldb_private::npdb::LookThroughModifierRecord(CVType modifier) {
+  lldbassert(modifier.kind() == LF_MODIFIER);
+  ModifierRecord mr;
+  llvm::cantFail(TypeDeserializer::deserializeAs<ModifierRecord>(modifier, mr));
+  return mr.ModifiedType;
 }
 
 llvm::StringRef lldb_private::npdb::DropNameScope(llvm::StringRef name) {

@@ -279,6 +279,7 @@ static bool ParseAnalyzerArgs(AnalyzerOptions &Opts, ArgList &Args,
   }
 
   Opts.ShowCheckerHelp = Args.hasArg(OPT_analyzer_checker_help);
+  Opts.ShowConfigOptionsList = Args.hasArg(OPT_analyzer_config_help);
   Opts.ShowEnabledCheckerList = Args.hasArg(OPT_analyzer_list_enabled_checkers);
   Opts.DisableAllChecks = Args.hasArg(OPT_analyzer_disable_all_checks);
 
@@ -968,11 +969,11 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
       Args.hasArg(OPT_fsanitize_cfi_icall_generalize_pointers);
   Opts.SanitizeStats = Args.hasArg(OPT_fsanitize_stats);
   if (Arg *A = Args.getLastArg(
-          OPT_fsanitize_address_poison_class_member_array_new_cookie,
-          OPT_fno_sanitize_address_poison_class_member_array_new_cookie)) {
-    Opts.SanitizeAddressPoisonClassMemberArrayNewCookie =
+          OPT_fsanitize_address_poison_custom_array_cookie,
+          OPT_fno_sanitize_address_poison_custom_array_cookie)) {
+    Opts.SanitizeAddressPoisonCustomArrayCookie =
         A->getOption().getID() ==
-        OPT_fsanitize_address_poison_class_member_array_new_cookie;
+        OPT_fsanitize_address_poison_custom_array_cookie;
   }
   if (Arg *A = Args.getLastArg(OPT_fsanitize_address_use_after_scope,
                                OPT_fno_sanitize_address_use_after_scope)) {
@@ -1474,7 +1475,7 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::EmitObj; break;
     case OPT_fixit_EQ:
       Opts.FixItSuffix = A->getValue();
-      // fall-through!
+      LLVM_FALLTHROUGH;
     case OPT_fixit:
       Opts.ProgramAction = frontend::FixIt; break;
     case OPT_emit_module:
@@ -1915,7 +1916,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
   if (IK.getLanguage() == InputKind::Asm) {
     Opts.AsmPreprocessor = 1;
   } else if (IK.isObjectiveC()) {
-    Opts.ObjC1 = Opts.ObjC2 = 1;
+    Opts.ObjC = 1;
   }
 
   if (LangStd == LangStandard::lang_unspecified) {
@@ -2178,6 +2179,9 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     }
   }
 
+  if (Args.hasArg(OPT_fno_dllexport_inlines))
+    Opts.DllExportInlines = false;
+
   if (const Arg *A = Args.getLastArg(OPT_fcf_protection_EQ)) {
     StringRef Name = A->getValue();
     if (Name == "full" || Name == "branch") {
@@ -2246,7 +2250,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
 
   Opts.GPURelocatableDeviceCode = Args.hasArg(OPT_fgpu_rdc);
 
-  if (Opts.ObjC1) {
+  if (Opts.ObjC) {
     if (Arg *arg = Args.getLastArg(OPT_fobjc_runtime_EQ)) {
       StringRef value = arg->getValue();
       if (Opts.ObjCRuntime.tryParse(value))
@@ -2685,6 +2689,14 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   if ((Opts.OpenMPIsDevice && T.isNVPTX()) || Opts.OpenCLCPlusPlus) {
     Opts.Exceptions = 0;
     Opts.CXXExceptions = 0;
+  }
+  if (Opts.OpenMPIsDevice && T.isNVPTX()) {
+    Opts.OpenMPCUDANumSMs =
+        getLastArgIntValue(Args, options::OPT_fopenmp_cuda_number_of_sm_EQ,
+                           Opts.OpenMPCUDANumSMs, Diags);
+    Opts.OpenMPCUDABlocksPerSM =
+        getLastArgIntValue(Args, options::OPT_fopenmp_cuda_blocks_per_sm_EQ,
+                           Opts.OpenMPCUDABlocksPerSM, Diags);
   }
 
   // Get the OpenMP target triples if any.
