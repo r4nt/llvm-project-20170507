@@ -17,7 +17,6 @@
 
 #include "FormatToken.h"
 #include "FormatTokenLexer.h"
-#include "clang/Basic/MemoryBufferCache.h"
 #include "clang/Format/Format.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
@@ -36,7 +35,7 @@ struct Macros::PPState {
               new IgnoringDiagConsumer),
         Headers(std::make_shared<HeaderSearchOptions>(), SourceMgr, Diags,
                 LangOpts, nullptr),
-        PP(makePPOpts(), Diags, LangOpts, SourceMgr, PCMCache, Headers,
+        PP(makePPOpts(), Diags, LangOpts, SourceMgr, Headers,
            TheModuleLoader) {}
 
   std::shared_ptr<clang::PreprocessorOptions> makePPOpts() {
@@ -48,7 +47,6 @@ struct Macros::PPState {
   clang::SourceManager &SourceMgr;
   clang::LangOptions LangOpts;
   clang::DiagnosticsEngine Diags;
-  clang::MemoryBufferCache PCMCache;
   clang::HeaderSearch Headers;
   clang::TrivialModuleLoader TheModuleLoader;
   clang::Preprocessor PP;

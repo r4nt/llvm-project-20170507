@@ -86,6 +86,7 @@ public:
                       UnwrappedLineConsumer &Callback,
                       llvm::SpecificBumpPtrAllocator<FormatToken> &Allocator,
                       IdentifierTable &IdentTable);
+  ~UnwrappedLineParser();
 
   void parse();
 
