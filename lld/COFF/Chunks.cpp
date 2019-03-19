@@ -1,9 +1,8 @@
 //===- Chunks.cpp ---------------------------------------------------------===//
 //
-//                             The LLVM Linker
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -11,6 +10,7 @@
 #include "InputFiles.h"
 #include "Symbols.h"
 #include "Writer.h"
+#include "SymbolTable.h"
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/COFF.h"
@@ -198,6 +198,7 @@ void SectionChunk::applyRelARM(uint8_t *Off, uint16_t Type, OutputSection *OS,
   case IMAGE_REL_ARM_BLX23T:    applyBranch24T(Off, SX - P - 4); break;
   case IMAGE_REL_ARM_SECTION:   applySecIdx(Off, OS); break;
   case IMAGE_REL_ARM_SECREL:    applySecRel(this, Off, OS, S); break;
+  case IMAGE_REL_ARM_REL32:     add32(Off, SX - P - 4); break;
   default:
     error("unsupported relocation type 0x" + Twine::utohexstr(Type) + " in " +
           toString(File));
@@ -309,10 +310,37 @@ void SectionChunk::applyRelARM64(uint8_t *Off, uint16_t Type, OutputSection *OS,
   case IMAGE_REL_ARM64_SECREL_HIGH12A: applySecRelHigh12A(this, Off, OS, S); break;
   case IMAGE_REL_ARM64_SECREL_LOW12L:  applySecRelLdr(this, Off, OS, S); break;
   case IMAGE_REL_ARM64_SECTION:        applySecIdx(Off, OS); break;
+  case IMAGE_REL_ARM64_REL32:          add32(Off, S - P - 4); break;
   default:
     error("unsupported relocation type 0x" + Twine::utohexstr(Type) + " in " +
           toString(File));
   }
+}
+
+static void maybeReportRelocationToDiscarded(const SectionChunk *FromChunk,
+                                             Defined *Sym,
+                                             const coff_relocation &Rel) {
+  // Don't report these errors when the relocation comes from a debug info
+  // section or in mingw mode. MinGW mode object files (built by GCC) can
+  // have leftover sections with relocations against discarded comdat
+  // sections. Such sections are left as is, with relocations untouched.
+  if (FromChunk->isCodeView() || FromChunk->isDWARF() || Config->MinGW)
+    return;
+
+  // Get the name of the symbol. If it's null, it was discarded early, so we
+  // have to go back to the object file.
+  ObjFile *File = FromChunk->File;
+  StringRef Name;
+  if (Sym) {
+    Name = Sym->getName();
+  } else {
+    COFFSymbolRef COFFSym =
+        check(File->getCOFFObj()->getSymbol(Rel.SymbolTableIndex));
+    File->getCOFFObj()->getSymbolName(COFFSym, Name);
+  }
+
+  error("relocation against symbol in discarded section: " + Name +
+        getSymbolLocations(File, Rel.SymbolTableIndex));
 }
 
 void SectionChunk::writeTo(uint8_t *Buf) const {
@@ -342,41 +370,23 @@ void SectionChunk::writeTo(uint8_t *Buf) const {
     // Use the potentially remapped Symbol instead of the one that the
     // relocation points to.
     auto *Sym = dyn_cast_or_null<Defined>(RelocTargets[I]);
-    if (!Sym) {
-      if (isCodeView() || isDWARF())
-        continue;
-      // Symbols in early discarded sections are represented using null pointers,
-      // so we need to retrieve the name from the object file.
-      COFFSymbolRef Sym =
-          check(File->getCOFFObj()->getSymbol(Rel.SymbolTableIndex));
-      StringRef Name;
-      File->getCOFFObj()->getSymbolName(Sym, Name);
 
-      // MinGW mode object files (built by GCC) can have leftover sections
-      // with relocations against discarded comdat sections. Such sections
-      // are left as is, with relocations untouched.
-      if (!Config->MinGW)
-        error("relocation against symbol in discarded section: " + Name);
-      continue;
-    }
     // Get the output section of the symbol for this relocation.  The output
     // section is needed to compute SECREL and SECTION relocations used in debug
     // info.
-    Chunk *C = Sym->getChunk();
+    Chunk *C = Sym ? Sym->getChunk() : nullptr;
     OutputSection *OS = C ? C->getOutputSection() : nullptr;
 
-    // Only absolute and __ImageBase symbols lack an output section. For any
-    // other symbol, this indicates that the chunk was discarded.  Normally
-    // relocations against discarded sections are an error.  However, debug info
-    // sections are not GC roots and can end up with these kinds of relocations.
-    // Skip these relocations.
-    if (!OS && !isa<DefinedAbsolute>(Sym) && !isa<DefinedSynthetic>(Sym)) {
-      if (isCodeView() || isDWARF())
-        continue;
-      error("relocation against symbol in discarded section: " +
-            Sym->getName());
+    // Skip the relocation if it refers to a discarded section, and diagnose it
+    // as an error if appropriate. If a symbol was discarded early, it may be
+    // null. If it was discarded late, the output section will be null, unless
+    // it was an absolute or synthetic symbol.
+    if (!Sym ||
+        (!OS && !isa<DefinedAbsolute>(Sym) && !isa<DefinedSynthetic>(Sym))) {
+      maybeReportRelocationToDiscarded(this, Sym, Rel);
       continue;
     }
+
     uint64_t S = Sym->getRVA();
 
     // Compute the RVA of the relocation for relative relocations.
@@ -584,6 +594,40 @@ ArrayRef<uint8_t> SectionChunk::getContents() const {
   return A;
 }
 
+ArrayRef<uint8_t> SectionChunk::consumeDebugMagic() {
+  assert(isCodeView());
+  return consumeDebugMagic(getContents(), SectionName);
+}
+
+ArrayRef<uint8_t> SectionChunk::consumeDebugMagic(ArrayRef<uint8_t> Data,
+                                                  StringRef SectionName) {
+  if (Data.empty())
+    return {};
+
+  // First 4 bytes are section magic.
+  if (Data.size() < 4)
+    fatal("the section is too short: " + SectionName);
+
+  if (!SectionName.startswith(".debug$"))
+    fatal("invalid section: " + SectionName);
+
+  unsigned Magic = support::endian::read32le(Data.data());
+  unsigned ExpectedMagic = SectionName == ".debug$H"
+                               ? DEBUG_HASHES_SECTION_MAGIC
+                               : DEBUG_SECTION_MAGIC;
+  if (Magic != ExpectedMagic)
+    fatal("section: " + SectionName + " has an invalid magic: " + Twine(Magic));
+  return Data.slice(4);
+}
+
+SectionChunk *SectionChunk::findByName(ArrayRef<SectionChunk *> Sections,
+                                       StringRef Name) {
+  for (SectionChunk *C : Sections)
+    if (C->getSectionName() == Name)
+      return C;
+  return nullptr;
+}
+
 void SectionChunk::replace(SectionChunk *Other) {
   Alignment = std::max(Alignment, Other->Alignment);
   Other->Repl = Repl;
@@ -610,6 +654,7 @@ uint32_t CommonChunk::getOutputCharacteristics() const {
 
 void StringChunk::writeTo(uint8_t *Buf) const {
   memcpy(Buf + OutputSectionOff, Str.data(), Str.size());
+  Buf[OutputSectionOff + Str.size()] = '\0';
 }
 
 ImportThunkChunkX64::ImportThunkChunkX64(Defined *S) : ImpSymbol(S) {
@@ -659,16 +704,36 @@ const uint8_t ArmThunk[] = {
     0xe7, 0x44,             // L1: add  pc, ip
 };
 
-size_t RangeExtensionThunk::getSize() const {
+size_t RangeExtensionThunkARM::getSize() const {
   assert(Config->Machine == ARMNT);
   return sizeof(ArmThunk);
 }
 
-void RangeExtensionThunk::writeTo(uint8_t *Buf) const {
+void RangeExtensionThunkARM::writeTo(uint8_t *Buf) const {
   assert(Config->Machine == ARMNT);
   uint64_t Offset = Target->getRVA() - RVA - 12;
   memcpy(Buf + OutputSectionOff, ArmThunk, sizeof(ArmThunk));
   applyMOV32T(Buf + OutputSectionOff, uint32_t(Offset));
+}
+
+// A position independent ARM64 adrp+add thunk, with a maximum range of
+// +/- 4 GB, which is enough for any PE-COFF.
+const uint8_t Arm64Thunk[] = {
+    0x10, 0x00, 0x00, 0x90, // adrp x16, Dest
+    0x10, 0x02, 0x00, 0x91, // add  x16, x16, :lo12:Dest
+    0x00, 0x02, 0x1f, 0xd6, // br   x16
+};
+
+size_t RangeExtensionThunkARM64::getSize() const {
+  assert(Config->Machine == ARM64);
+  return sizeof(Arm64Thunk);
+}
+
+void RangeExtensionThunkARM64::writeTo(uint8_t *Buf) const {
+  assert(Config->Machine == ARM64);
+  memcpy(Buf + OutputSectionOff, Arm64Thunk, sizeof(Arm64Thunk));
+  applyArm64Addr(Buf + OutputSectionOff + 0, Target->getRVA(), RVA, 12);
+  applyArm64Imm(Buf + OutputSectionOff + 4, Target->getRVA() & 0xfff, 0);
 }
 
 void LocalImportChunk::getBaserels(std::vector<Baserel> *Res) {

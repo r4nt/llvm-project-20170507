@@ -1,9 +1,8 @@
 //===- unittests/Support/VirtualFileSystem.cpp -------------- VFS tests ---===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -350,13 +349,18 @@ struct ScopedDir {
     std::error_code EC;
     if (Unique) {
       EC = llvm::sys::fs::createUniqueDirectory(Name, Path);
+      if (!EC) {
+        // Resolve any symlinks in the new directory.
+        std::string UnresolvedPath = Path.str();
+        EC = llvm::sys::fs::real_path(UnresolvedPath, Path);
+      }
     } else {
       Path = Name.str();
       EC = llvm::sys::fs::create_directory(Twine(Path));
     }
     if (EC)
       Path = "";
-    EXPECT_FALSE(EC);
+    EXPECT_FALSE(EC) << EC.message();
   }
   ~ScopedDir() {
     if (Path != "") {
@@ -381,6 +385,25 @@ struct ScopedLink {
     }
   }
   operator StringRef() { return Path.str(); }
+};
+
+struct ScopedFile {
+  SmallString<128> Path;
+  ScopedFile(const Twine &Path, StringRef Contents) {
+    Path.toVector(this->Path);
+    std::error_code EC;
+    raw_fd_ostream OS(this->Path, EC);
+    EXPECT_FALSE(EC);
+    OS << Contents;
+    OS.flush();
+    EXPECT_FALSE(OS.error());
+    if (EC || OS.error())
+      this->Path = "";
+  }
+  ~ScopedFile() {
+    if (Path != "")
+      EXPECT_FALSE(llvm::sys::fs::remove(Path.str()));
+  }
 };
 } // end anonymous namespace
 
@@ -412,6 +435,67 @@ TEST(VirtualFileSystemTest, BasicRealFSIteration) {
 }
 
 #ifdef LLVM_ON_UNIX
+TEST(VirtualFileSystemTest, MultipleWorkingDirs) {
+  // Our root contains a/aa, b/bb, c, where c is a link to a/.
+  // Run tests both in root/b/ and root/c/ (to test "normal" and symlink dirs).
+  // Interleave operations to show the working directories are independent.
+  ScopedDir Root("r", true), ADir(Root.Path + "/a"), BDir(Root.Path + "/b");
+  ScopedLink C(ADir.Path, Root.Path + "/c");
+  ScopedFile AA(ADir.Path + "/aa", "aaaa"), BB(BDir.Path + "/bb", "bbbb");
+  std::unique_ptr<vfs::FileSystem> BFS = vfs::createPhysicalFileSystem(),
+                                   CFS = vfs::createPhysicalFileSystem();
+
+  ASSERT_FALSE(BFS->setCurrentWorkingDirectory(BDir.Path));
+  ASSERT_FALSE(CFS->setCurrentWorkingDirectory(C.Path));
+  EXPECT_EQ(BDir.Path, *BFS->getCurrentWorkingDirectory());
+  EXPECT_EQ(C.Path, *CFS->getCurrentWorkingDirectory());
+
+  // openFileForRead(), indirectly.
+  auto BBuf = BFS->getBufferForFile("bb");
+  ASSERT_TRUE(BBuf);
+  EXPECT_EQ("bbbb", (*BBuf)->getBuffer());
+
+  auto ABuf = CFS->getBufferForFile("aa");
+  ASSERT_TRUE(ABuf);
+  EXPECT_EQ("aaaa", (*ABuf)->getBuffer());
+
+  // status()
+  auto BStat = BFS->status("bb");
+  ASSERT_TRUE(BStat);
+  EXPECT_EQ("bb", BStat->getName());
+
+  auto AStat = CFS->status("aa");
+  ASSERT_TRUE(AStat);
+  EXPECT_EQ("aa", AStat->getName()); // unresolved name
+
+  // getRealPath()
+  SmallString<128> BPath;
+  ASSERT_FALSE(BFS->getRealPath("bb", BPath));
+  EXPECT_EQ(BB.Path, BPath);
+
+  SmallString<128> APath;
+  ASSERT_FALSE(CFS->getRealPath("aa", APath));
+  EXPECT_EQ(AA.Path, APath); // Reports resolved name.
+
+  // dir_begin
+  std::error_code EC;
+  auto BIt = BFS->dir_begin(".", EC);
+  ASSERT_FALSE(EC);
+  ASSERT_NE(BIt, vfs::directory_iterator());
+  EXPECT_EQ((BDir.Path + "/./bb").str(), BIt->path());
+  BIt.increment(EC);
+  ASSERT_FALSE(EC);
+  ASSERT_EQ(BIt, vfs::directory_iterator());
+
+  auto CIt = CFS->dir_begin(".", EC);
+  ASSERT_FALSE(EC);
+  ASSERT_NE(CIt, vfs::directory_iterator());
+  EXPECT_EQ((ADir.Path + "/./aa").str(), CIt->path()); // Partly resolved name!
+  CIt.increment(EC); // Because likely to read through this path.
+  ASSERT_FALSE(EC);
+  ASSERT_EQ(CIt, vfs::directory_iterator());
+}
+
 TEST(VirtualFileSystemTest, BrokenSymlinkRealFSIteration) {
   ScopedDir TestDirectory("virtual-file-system-test", /*Unique*/ true);
   IntrusiveRefCntPtr<vfs::FileSystem> FS = vfs::getRealFileSystem();
@@ -743,6 +827,43 @@ TEST(VirtualFileSystemTest, HiddenInIteration) {
   }
 }
 
+TEST(ProxyFileSystemTest, Basic) {
+  IntrusiveRefCntPtr<vfs::InMemoryFileSystem> Base(
+      new vfs::InMemoryFileSystem());
+  vfs::ProxyFileSystem PFS(Base);
+
+  Base->addFile("/a", 0, MemoryBuffer::getMemBuffer("test"));
+
+  auto Stat = PFS.status("/a");
+  ASSERT_FALSE(Stat.getError());
+
+  auto File = PFS.openFileForRead("/a");
+  ASSERT_FALSE(File.getError());
+  EXPECT_EQ("test", (*(*File)->getBuffer("ignored"))->getBuffer());
+
+  std::error_code EC;
+  vfs::directory_iterator I = PFS.dir_begin("/", EC);
+  ASSERT_FALSE(EC);
+  ASSERT_EQ("/a", I->path());
+  I.increment(EC);
+  ASSERT_FALSE(EC);
+  ASSERT_EQ(vfs::directory_iterator(), I);
+
+  ASSERT_FALSE(PFS.setCurrentWorkingDirectory("/"));
+
+  auto PWD = PFS.getCurrentWorkingDirectory();
+  ASSERT_FALSE(PWD.getError());
+  ASSERT_EQ("/", *PWD);
+
+  SmallString<16> Path;
+  ASSERT_FALSE(PFS.getRealPath("a", Path));
+  ASSERT_EQ("/a", Path);
+
+  bool Local = true;
+  ASSERT_FALSE(PFS.isLocal("/a", Local));
+  EXPECT_FALSE(Local);
+}
+
 class InMemoryFileSystemTest : public ::testing::Test {
 protected:
   llvm::vfs::InMemoryFileSystem FS;
@@ -883,6 +1004,17 @@ TEST_F(InMemoryFileSystemTest, WorkingDirectory) {
   NormalizedFS.setCurrentWorkingDirectory("..");
   ASSERT_EQ("/b",
             getPosixPath(NormalizedFS.getCurrentWorkingDirectory().get()));
+}
+
+TEST_F(InMemoryFileSystemTest, IsLocal) {
+  FS.setCurrentWorkingDirectory("/b");
+  FS.addFile("c", 0, MemoryBuffer::getMemBuffer(""));
+
+  std::error_code EC;
+  bool IsLocal = true;
+  EC = FS.isLocal("c", IsLocal);
+  ASSERT_FALSE(EC);
+  ASSERT_FALSE(IsLocal);
 }
 
 #if !defined(_WIN32)
@@ -1763,4 +1895,50 @@ TEST_F(VFSFromYAMLTest, DirectoryIterationErrorInVFSLayer) {
   std::error_code EC;
   checkContents(FS->dir_begin("//root/foo", EC),
                 {"//root/foo/a", "//root/foo/b"});
+}
+
+TEST_F(VFSFromYAMLTest, GetRealPath) {
+  IntrusiveRefCntPtr<DummyFileSystem> Lower(new DummyFileSystem());
+  Lower->addDirectory("//dir/");
+  Lower->addRegularFile("/foo");
+  Lower->addSymlink("/link");
+  IntrusiveRefCntPtr<vfs::FileSystem> FS = getFromYAMLString(
+      "{ 'use-external-names': false,\n"
+      "  'roots': [\n"
+      "{\n"
+      "  'type': 'directory',\n"
+      "  'name': '//root/',\n"
+      "  'contents': [ {\n"
+      "                  'type': 'file',\n"
+      "                  'name': 'bar',\n"
+      "                  'external-contents': '/link'\n"
+      "                }\n"
+      "              ]\n"
+      "},\n"
+      "{\n"
+      "  'type': 'directory',\n"
+      "  'name': '//dir/',\n"
+      "  'contents': []\n"
+      "}\n"
+      "]\n"
+      "}",
+      Lower);
+  ASSERT_TRUE(FS.get() != nullptr);
+
+  // Regular file present in underlying file system.
+  SmallString<16> RealPath;
+  EXPECT_FALSE(FS->getRealPath("/foo", RealPath));
+  EXPECT_EQ(RealPath.str(), "/foo");
+
+  // File present in YAML pointing to symlink in underlying file system.
+  EXPECT_FALSE(FS->getRealPath("//root/bar", RealPath));
+  EXPECT_EQ(RealPath.str(), "/symlink");
+
+  // Directories should fall back to the underlying file system is possible.
+  EXPECT_FALSE(FS->getRealPath("//dir/", RealPath));
+  EXPECT_EQ(RealPath.str(), "//dir/");
+
+  // Try a non-existing file.
+  EXPECT_EQ(FS->getRealPath("/non_existing", RealPath),
+            errc::no_such_file_or_directory);
 }

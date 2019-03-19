@@ -1,9 +1,8 @@
 //===- Symbols.h ------------------------------------------------*- C++ -*-===//
 //
-//                             The LLVM Linker
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -31,13 +30,6 @@ std::string toString(const elf::InputFile *);
 
 namespace elf {
 
-class ArchiveFile;
-class BitcodeFile;
-class BssSection;
-class InputFile;
-class LazyObjFile;
-template <class ELFT> class ObjFile;
-class OutputSection;
 template <class ELFT> class SharedFile;
 
 // This is a StringRef-like container that doesn't run strlen().
@@ -79,6 +71,7 @@ public:
   uint32_t DynsymIndex = 0;
   uint32_t GotIndex = -1;
   uint32_t PltIndex = -1;
+
   uint32_t GlobalDynIndex = -1;
 
   // This field is a index to the symbol's version definition.
@@ -86,6 +79,9 @@ public:
 
   // Version definition index.
   uint16_t VersionId;
+
+  // An index into the .branch_lt section on PPC64.
+  uint16_t PPC64BranchltIndex = -1;
 
   // Symbol binding. This is not overwritten by replaceSymbol to track
   // changes during resolution. In particular:
@@ -106,8 +102,8 @@ public:
 
   // True if the symbol was used for linking and thus need to be added to the
   // output file's symbol table. This is true for all symbols except for
-  // unreferenced DSO symbols and bitcode symbols that are unreferenced except
-  // by other bitcode objects.
+  // unreferenced DSO symbols, lazy (archive) symbols, and bitcode symbols that
+  // are unreferenced except by other bitcode objects.
   unsigned IsUsedInRegularObj : 1;
 
   // If this flag is true and the symbol has protected or default visibility, it
@@ -159,6 +155,7 @@ public:
 
   bool isInGot() const { return GotIndex != -1U; }
   bool isInPlt() const { return PltIndex != -1U; }
+  bool isInPPC64Branchlt() const { return PPC64BranchltIndex != 0xffff; }
 
   uint64_t getVA(int64_t Addend = 0) const;
 
@@ -167,7 +164,8 @@ public:
   uint64_t getGotPltOffset() const;
   uint64_t getGotPltVA() const;
   uint64_t getPltVA() const;
-  uint64_t getPltOffset() const;
+  uint64_t getPPC64LongBranchTableVA() const;
+  uint64_t getPPC64LongBranchOffset() const;
   uint64_t getSize() const;
   OutputSection *getOutputSection() const;
 
@@ -176,7 +174,7 @@ protected:
          uint8_t StOther, uint8_t Type)
       : File(File), NameData(Name.Data), NameSize(Name.Size), Binding(Binding),
         Type(Type), StOther(StOther), SymbolKind(K), NeedsPltAddr(false),
-        IsInIplt(false), IsInIgot(false), IsPreemptible(false),
+        IsInIplt(false), GotInIgot(false), IsPreemptible(false),
         Used(!Config->GcSections), NeedsTocRestore(false),
         ScriptDefined(false) {}
 
@@ -185,11 +183,13 @@ public:
   // For SharedSymbol only.
   unsigned NeedsPltAddr : 1;
 
-  // True if this symbol is in the Iplt sub-section of the Plt.
+  // True if this symbol is in the Iplt sub-section of the Plt and the Igot
+  // sub-section of the .got.plt or .got.
   unsigned IsInIplt : 1;
 
-  // True if this symbol is in the Igot sub-section of the .got.plt or .got.
-  unsigned IsInIgot : 1;
+  // True if this symbol needs a GOT entry and its GOT entry is actually in
+  // Igot. This will be true only for certain non-preemptible ifuncs.
+  unsigned GotInIgot : 1;
 
   // True if this symbol is preemptible at load time.
   unsigned IsPreemptible : 1;
@@ -346,7 +346,8 @@ struct ElfSym {
   static Defined *MipsGpDisp;
   static Defined *MipsLocalGp;
 
-  // __rela_iplt_end or __rel_iplt_end
+  // __rel{,a}_iplt_{start,end} symbols.
+  static Defined *RelaIpltStart;
   static Defined *RelaIpltEnd;
 };
 

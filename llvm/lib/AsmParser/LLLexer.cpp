@@ -1,9 +1,8 @@
 //===- LLLexer.cpp - Lexer for .ll Files ----------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -685,6 +684,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(uwtable);
   KEYWORD(writeonly);
   KEYWORD(zeroext);
+  KEYWORD(immarg);
 
   KEYWORD(type);
   KEYWORD(opaque);
@@ -740,6 +740,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(readOnly);
   KEYWORD(noRecurse);
   KEYWORD(returnDoesNotAlias);
+  KEYWORD(noInline);
   KEYWORD(calls);
   KEYWORD(callee);
   KEYWORD(hotness);
@@ -787,6 +788,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(info);
   KEYWORD(byte);
   KEYWORD(bit);
+  KEYWORD(varFlags);
 
 #undef KEYWORD
 
@@ -822,6 +824,8 @@ lltok::Kind LLLexer::LexIdentifier() {
     }                                                                          \
   } while (false)
 
+  INSTKEYWORD(fneg,  FNeg);
+
   INSTKEYWORD(add,   Add);  INSTKEYWORD(fadd,   FAdd);
   INSTKEYWORD(sub,   Sub);  INSTKEYWORD(fsub,   FSub);
   INSTKEYWORD(mul,   Mul);  INSTKEYWORD(fmul,   FMul);
@@ -855,6 +859,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   INSTKEYWORD(invoke,      Invoke);
   INSTKEYWORD(resume,      Resume);
   INSTKEYWORD(unreachable, Unreachable);
+  INSTKEYWORD(callbr,      CallBr);
 
   INSTKEYWORD(alloca,      Alloca);
   INSTKEYWORD(load,        Load);
@@ -899,6 +904,11 @@ lltok::Kind LLLexer::LexIdentifier() {
   if (Keyword.startswith("DIFlag")) {
     StrVal.assign(Keyword.begin(), Keyword.end());
     return lltok::DIFlag;
+  }
+
+  if (Keyword.startswith("DISPFlag")) {
+    StrVal.assign(Keyword.begin(), Keyword.end());
+    return lltok::DISPFlag;
   }
 
   if (Keyword.startswith("CSK_")) {

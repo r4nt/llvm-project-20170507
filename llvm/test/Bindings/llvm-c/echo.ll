@@ -28,6 +28,13 @@ module asm "classical GAS"
 @aliased4 = weak alias i32, i32* @var
 @aliased5 = weak_odr alias i32, i32* @var
 
+@ifunc = ifunc i32 (i32), i64 ()* @ifunc_resolver
+
+define i64 @ifunc_resolver() {
+entry:
+  ret i64 0
+}
+
 define { i64, %S* } @unpackrepack(%S %s) {
   %1 = extractvalue %S %s, 0
   %2 = extractvalue %S %s, 1
@@ -168,6 +175,22 @@ exit:
 
 define void @with_debuginfo() !dbg !4 {
   ret void, !dbg !7
+}
+
+declare i8* @llvm.stacksave()
+declare void @llvm.stackrestore(i8*)
+declare void @llvm.lifetime.start.p0i8(i64, i8*)
+declare void @llvm.lifetime.end.p0i8(i64, i8*)
+
+define void @test_intrinsics() {
+entry:
+  %sp = call i8* @llvm.stacksave()
+  %x = alloca i32
+  %0 = bitcast i32* %x to i8*
+  call void @llvm.lifetime.start.p0i8(i64 4, i8* %0)
+  call void @llvm.lifetime.end.p0i8(i64 4, i8* %0)
+  call void @llvm.stackrestore(i8* %sp)
+  ret void
 }
 
 !llvm.dbg.cu = !{!0, !2}

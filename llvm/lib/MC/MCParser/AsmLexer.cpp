@@ -1,9 +1,8 @@
 //===- AsmLexer.cpp - Lexer for Assembly Files ----------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -557,7 +556,7 @@ AsmToken AsmLexer::LexToken() {
     AsmToken TokenBuf[2];
     MutableArrayRef<AsmToken> Buf(TokenBuf, 2);
     size_t num = peekTokens(Buf, true);
-    // There cannot be a space preceeding this
+    // There cannot be a space preceding this
     if (IsAtStartOfLine && num == 2 && TokenBuf[0].is(AsmToken::Integer) &&
         TokenBuf[1].is(AsmToken::String)) {
       CurPtr = TokStart; // reset curPtr;
@@ -627,7 +626,6 @@ AsmToken AsmLexer::LexToken() {
     return AsmToken(AsmToken::EndOfStatement, StringRef(TokStart, 1));
   case ':': return AsmToken(AsmToken::Colon, StringRef(TokStart, 1));
   case '+': return AsmToken(AsmToken::Plus, StringRef(TokStart, 1));
-  case '-': return AsmToken(AsmToken::Minus, StringRef(TokStart, 1));
   case '~': return AsmToken(AsmToken::Tilde, StringRef(TokStart, 1));
   case '(': return AsmToken(AsmToken::LParen, StringRef(TokStart, 1));
   case ')': return AsmToken(AsmToken::RParen, StringRef(TokStart, 1));
@@ -646,6 +644,12 @@ AsmToken AsmLexer::LexToken() {
       return AsmToken(AsmToken::EqualEqual, StringRef(TokStart, 2));
     }
     return AsmToken(AsmToken::Equal, StringRef(TokStart, 1));
+  case '-':
+    if (*CurPtr == '>') {
+      ++CurPtr;
+      return AsmToken(AsmToken::MinusGreater, StringRef(TokStart, 2));
+    }
+    return AsmToken(AsmToken::Minus, StringRef(TokStart, 1));
   case '|':
     if (*CurPtr == '|') {
       ++CurPtr;

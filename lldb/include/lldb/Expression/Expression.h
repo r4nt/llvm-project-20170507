@@ -1,23 +1,18 @@
 //===-- Expression.h --------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef liblldb_Expression_h_
 #define liblldb_Expression_h_
 
-// C Includes
-// C++ Includes
 #include <map>
 #include <string>
 #include <vector>
 
-// Other libraries and framework includes
-// Project includes
 
 #include "lldb/Expression/ExpressionTypeSystemHelper.h"
 #include "lldb/lldb-forward.h"
@@ -28,7 +23,7 @@ namespace lldb_private {
 class RecordingMemoryManager;
 
 //----------------------------------------------------------------------
-/// @class Expression Expression.h "lldb/Expression/Expression.h" Encapsulates
+/// \class Expression Expression.h "lldb/Expression/Expression.h" Encapsulates
 /// a single expression for use in lldb
 ///
 /// LLDB uses expressions for various purposes, notably to call functions
@@ -39,11 +34,22 @@ class RecordingMemoryManager;
 //----------------------------------------------------------------------
 class Expression {
 public:
+  /// Discriminator for LLVM-style RTTI (dyn_cast<> et al.)
+  enum ExpressionKind {
+    eKindFunctionCaller,
+    eKindClangFunctionCaller,
+    eKindUserExpression,
+    eKindLLVMUserExpression,
+    eKindClangUserExpression,
+    eKindUtilityFunction,
+    eKindClangUtilityFunction,
+  };
+
   enum ResultType { eResultTypeAny, eResultTypeId };
 
-  Expression(Target &target);
+  Expression(Target &target, ExpressionKind kind);
 
-  Expression(ExecutionContextScope &exe_scope);
+  Expression(ExecutionContextScope &exe_scope, ExpressionKind kind);
 
   //------------------------------------------------------------------
   /// Destructor
@@ -108,6 +114,12 @@ public:
 
   virtual ExpressionTypeSystemHelper *GetTypeSystemHelper() { return nullptr; }
 
+  /// LLVM-style RTTI support.
+  ExpressionKind getKind() const { return m_kind; }
+  
+private:
+  /// LLVM-style RTTI support.
+  const ExpressionKind m_kind;
 protected:
   lldb::TargetWP m_target_wp; /// Expression's always have to have a target...
   lldb::ProcessWP m_jit_process_wp; /// An expression might have a process, but

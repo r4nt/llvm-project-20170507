@@ -1,9 +1,8 @@
 //===- JumpThreading.cpp - Thread control through conditional blocks ------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -24,6 +23,7 @@
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/GuardUtils.h"
 #include "llvm/Analysis/InstructionSimplify.h"
@@ -38,7 +38,6 @@
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DomTreeUpdater.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
@@ -574,19 +573,17 @@ static Constant *getKnownConstant(Value *Val, ConstantPreference Preference) {
 /// BB in the result vector.
 ///
 /// This returns true if there were any known values.
-bool JumpThreadingPass::ComputeValueKnownInPredecessors(
+bool JumpThreadingPass::ComputeValueKnownInPredecessorsImpl(
     Value *V, BasicBlock *BB, PredValueInfo &Result,
-    ConstantPreference Preference, Instruction *CxtI) {
+    ConstantPreference Preference,
+    DenseSet<std::pair<Value *, BasicBlock *>> &RecursionSet,
+    Instruction *CxtI) {
   // This method walks up use-def chains recursively.  Because of this, we could
   // get into an infinite loop going around loops in the use-def chain.  To
   // prevent this, keep track of what (value, block) pairs we've already visited
   // and terminate the search if we loop back to them
   if (!RecursionSet.insert(std::make_pair(V, BB)).second)
     return false;
-
-  // An RAII help to remove this pair from the recursion set once the recursion
-  // stack pops back out again.
-  RecursionSetRemover remover(RecursionSet, std::make_pair(V, BB));
 
   // If V is a constant, then it is known in all predecessors.
   if (Constant *KC = getKnownConstant(V, Preference)) {
@@ -657,7 +654,8 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
     Value *Source = CI->getOperand(0);
     if (!isa<PHINode>(Source) && !isa<CmpInst>(Source))
       return false;
-    ComputeValueKnownInPredecessors(Source, BB, Result, Preference, CxtI);
+    ComputeValueKnownInPredecessorsImpl(Source, BB, Result, Preference,
+                                        RecursionSet, CxtI);
     if (Result.empty())
       return false;
 
@@ -677,10 +675,10 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
         I->getOpcode() == Instruction::And) {
       PredValueInfoTy LHSVals, RHSVals;
 
-      ComputeValueKnownInPredecessors(I->getOperand(0), BB, LHSVals,
-                                      WantInteger, CxtI);
-      ComputeValueKnownInPredecessors(I->getOperand(1), BB, RHSVals,
-                                      WantInteger, CxtI);
+      ComputeValueKnownInPredecessorsImpl(I->getOperand(0), BB, LHSVals,
+                                      WantInteger, RecursionSet, CxtI);
+      ComputeValueKnownInPredecessorsImpl(I->getOperand(1), BB, RHSVals,
+                                          WantInteger, RecursionSet, CxtI);
 
       if (LHSVals.empty() && RHSVals.empty())
         return false;
@@ -715,8 +713,8 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
     if (I->getOpcode() == Instruction::Xor &&
         isa<ConstantInt>(I->getOperand(1)) &&
         cast<ConstantInt>(I->getOperand(1))->isOne()) {
-      ComputeValueKnownInPredecessors(I->getOperand(0), BB, Result,
-                                      WantInteger, CxtI);
+      ComputeValueKnownInPredecessorsImpl(I->getOperand(0), BB, Result,
+                                          WantInteger, RecursionSet, CxtI);
       if (Result.empty())
         return false;
 
@@ -733,8 +731,8 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
             && "A binary operator creating a block address?");
     if (ConstantInt *CI = dyn_cast<ConstantInt>(BO->getOperand(1))) {
       PredValueInfoTy LHSVals;
-      ComputeValueKnownInPredecessors(BO->getOperand(0), BB, LHSVals,
-                                      WantInteger, CxtI);
+      ComputeValueKnownInPredecessorsImpl(BO->getOperand(0), BB, LHSVals,
+                                          WantInteger, RecursionSet, CxtI);
 
       // Try to use constant folding to simplify the binary operator.
       for (const auto &LHSVal : LHSVals) {
@@ -879,8 +877,8 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
       // Try to find a constant value for the LHS of a comparison,
       // and evaluate it statically if we can.
       PredValueInfoTy LHSVals;
-      ComputeValueKnownInPredecessors(I->getOperand(0), BB, LHSVals,
-                                      WantInteger, CxtI);
+      ComputeValueKnownInPredecessorsImpl(I->getOperand(0), BB, LHSVals,
+                                          WantInteger, RecursionSet, CxtI);
 
       for (const auto &LHSVal : LHSVals) {
         Constant *V = LHSVal.first;
@@ -900,8 +898,8 @@ bool JumpThreadingPass::ComputeValueKnownInPredecessors(
     Constant *FalseVal = getKnownConstant(SI->getFalseValue(), Preference);
     PredValueInfoTy Conds;
     if ((TrueVal || FalseVal) &&
-        ComputeValueKnownInPredecessors(SI->getCondition(), BB, Conds,
-                                        WantInteger, CxtI)) {
+        ComputeValueKnownInPredecessorsImpl(SI->getCondition(), BB, Conds,
+                                            WantInteger, RecursionSet, CxtI)) {
       for (auto &C : Conds) {
         Constant *Cond = C.first;
 
@@ -1057,7 +1055,7 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
     Condition = IB->getAddress()->stripPointerCasts();
     Preference = WantBlockAddress;
   } else {
-    return false; // Must be an invoke.
+    return false; // Must be an invoke or callbr.
   }
 
   // Run constant folding to see if we can reduce the condition to a simple
@@ -1093,7 +1091,7 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
                       << "' folding undef terminator: " << *BBTerm << '\n');
     BranchInst::Create(BBTerm->getSuccessor(BestSucc), BBTerm);
     BBTerm->eraseFromParent();
-    DTU->applyUpdates(Updates);
+    DTU->applyUpdatesPermissive(Updates);
     return true;
   }
 
@@ -1144,7 +1142,9 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
         unsigned ToKeep = Ret == LazyValueInfo::True ? 0 : 1;
         BasicBlock *ToRemoveSucc = CondBr->getSuccessor(ToRemove);
         ToRemoveSucc->removePredecessor(BB, true);
-        BranchInst::Create(CondBr->getSuccessor(ToKeep), CondBr);
+        BranchInst *UncondBr =
+          BranchInst::Create(CondBr->getSuccessor(ToKeep), CondBr);
+        UncondBr->setDebugLoc(CondBr->getDebugLoc());
         CondBr->eraseFromParent();
         if (CondCmp->use_empty())
           CondCmp->eraseFromParent();
@@ -1161,7 +1161,8 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
             ConstantInt::getFalse(CondCmp->getType());
           ReplaceFoldableUses(CondCmp, CI);
         }
-        DTU->deleteEdgeRelaxed(BB, ToRemoveSucc);
+        DTU->applyUpdatesPermissive(
+            {{DominatorTree::Delete, BB, ToRemoveSucc}});
         return true;
       }
 
@@ -1171,6 +1172,9 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
         return true;
     }
   }
+
+  if (SwitchInst *SI = dyn_cast<SwitchInst>(BB->getTerminator()))
+    TryToUnfoldSelect(SI, BB);
 
   // Check for some cases that are worth simplifying.  Right now we want to look
   // for loads that are used by a switch or by the condition for the branch.  If
@@ -1243,9 +1247,10 @@ bool JumpThreadingPass::ProcessImpliedCondition(BasicBlock *BB) {
       BasicBlock *KeepSucc = BI->getSuccessor(*Implication ? 0 : 1);
       BasicBlock *RemoveSucc = BI->getSuccessor(*Implication ? 1 : 0);
       RemoveSucc->removePredecessor(BB);
-      BranchInst::Create(KeepSucc, BI);
+      BranchInst *UncondBI = BranchInst::Create(KeepSucc, BI);
+      UncondBI->setDebugLoc(BI->getDebugLoc());
       BI->eraseFromParent();
-      DTU->deleteEdgeRelaxed(BB, RemoveSucc);
+      DTU->applyUpdatesPermissive({{DominatorTree::Delete, BB, RemoveSucc}});
       return true;
     }
     CurrentBB = CurrentPred;
@@ -1427,7 +1432,9 @@ bool JumpThreadingPass::SimplifyPartiallyRedundantLoad(LoadInst *LoadI) {
     // Add all the unavailable predecessors to the PredsToSplit list.
     for (BasicBlock *P : predecessors(LoadBB)) {
       // If the predecessor is an indirect goto, we can't split the edge.
-      if (isa<IndirectBrInst>(P->getTerminator()))
+      // Same for CallBr.
+      if (isa<IndirectBrInst>(P->getTerminator()) ||
+          isa<CallBrInst>(P->getTerminator()))
         return false;
 
       if (!AvailablePredSet.count(P))
@@ -1444,11 +1451,11 @@ bool JumpThreadingPass::SimplifyPartiallyRedundantLoad(LoadInst *LoadI) {
   if (UnavailablePred) {
     assert(UnavailablePred->getTerminator()->getNumSuccessors() == 1 &&
            "Can't handle critical edge here!");
-    LoadInst *NewVal =
-        new LoadInst(LoadedPtr->DoPHITranslation(LoadBB, UnavailablePred),
-                     LoadI->getName() + ".pr", false, LoadI->getAlignment(),
-                     LoadI->getOrdering(), LoadI->getSyncScopeID(),
-                     UnavailablePred->getTerminator());
+    LoadInst *NewVal = new LoadInst(
+        LoadI->getType(), LoadedPtr->DoPHITranslation(LoadBB, UnavailablePred),
+        LoadI->getName() + ".pr", false, LoadI->getAlignment(),
+        LoadI->getOrdering(), LoadI->getSyncScopeID(),
+        UnavailablePred->getTerminator());
     NewVal->setDebugLoc(LoadI->getDebugLoc());
     if (AATags)
       NewVal->setAAMetadata(AATags);
@@ -1640,8 +1647,9 @@ bool JumpThreadingPass::ProcessThreadableEdges(Value *Cond, BasicBlock *BB,
     ++PredWithKnownDest;
 
     // If the predecessor ends with an indirect goto, we can't change its
-    // destination.
-    if (isa<IndirectBrInst>(Pred->getTerminator()))
+    // destination. Same for CallBr.
+    if (isa<IndirectBrInst>(Pred->getTerminator()) ||
+        isa<CallBrInst>(Pred->getTerminator()))
       continue;
 
     PredToDestList.push_back(std::make_pair(Pred, DestBB));
@@ -1672,7 +1680,7 @@ bool JumpThreadingPass::ProcessThreadableEdges(Value *Cond, BasicBlock *BB,
       Instruction *Term = BB->getTerminator();
       BranchInst::Create(OnlyDest, Term);
       Term->eraseFromParent();
-      DTU->applyUpdates(Updates);
+      DTU->applyUpdatesPermissive(Updates);
 
       // If the condition is now dead due to the removal of the old terminator,
       // erase it.
@@ -2014,9 +2022,9 @@ bool JumpThreadingPass::ThreadEdge(BasicBlock *BB,
     }
 
   // Enqueue required DT updates.
-  DTU->applyUpdates({{DominatorTree::Insert, NewBB, SuccBB},
-                     {DominatorTree::Insert, PredBB, NewBB},
-                     {DominatorTree::Delete, PredBB, BB}});
+  DTU->applyUpdatesPermissive({{DominatorTree::Insert, NewBB, SuccBB},
+                               {DominatorTree::Insert, PredBB, NewBB},
+                               {DominatorTree::Delete, PredBB, BB}});
 
   // If there were values defined in BB that are used outside the block, then we
   // now have to update all uses of the value to use either the original value,
@@ -2110,7 +2118,7 @@ BasicBlock *JumpThreadingPass::SplitBlockPreds(BasicBlock *BB,
       BFI->setBlockFreq(NewBB, NewBBFreq.getFrequency());
   }
 
-  DTU->applyUpdates(Updates);
+  DTU->applyUpdatesPermissive(Updates);
   return NewBBs[0];
 }
 
@@ -2383,10 +2391,76 @@ bool JumpThreadingPass::DuplicateCondBranchOnPHIIntoPred(
 
   // Remove the unconditional branch at the end of the PredBB block.
   OldPredBranch->eraseFromParent();
-  DTU->applyUpdates(Updates);
+  DTU->applyUpdatesPermissive(Updates);
 
   ++NumDupes;
   return true;
+}
+
+// Pred is a predecessor of BB with an unconditional branch to BB. SI is
+// a Select instruction in Pred. BB has other predecessors and SI is used in
+// a PHI node in BB. SI has no other use.
+// A new basic block, NewBB, is created and SI is converted to compare and 
+// conditional branch. SI is erased from parent.
+void JumpThreadingPass::UnfoldSelectInstr(BasicBlock *Pred, BasicBlock *BB,
+                                          SelectInst *SI, PHINode *SIUse,
+                                          unsigned Idx) {
+  // Expand the select.
+  //
+  // Pred --
+  //  |    v
+  //  |  NewBB
+  //  |    |
+  //  |-----
+  //  v
+  // BB
+  BranchInst *PredTerm = dyn_cast<BranchInst>(Pred->getTerminator());
+  BasicBlock *NewBB = BasicBlock::Create(BB->getContext(), "select.unfold",
+                                         BB->getParent(), BB);
+  // Move the unconditional branch to NewBB.
+  PredTerm->removeFromParent();
+  NewBB->getInstList().insert(NewBB->end(), PredTerm);
+  // Create a conditional branch and update PHI nodes.
+  BranchInst::Create(NewBB, BB, SI->getCondition(), Pred);
+  SIUse->setIncomingValue(Idx, SI->getFalseValue());
+  SIUse->addIncoming(SI->getTrueValue(), NewBB);
+
+  // The select is now dead.
+  SI->eraseFromParent();
+  DTU->applyUpdatesPermissive({{DominatorTree::Insert, NewBB, BB},
+                               {DominatorTree::Insert, Pred, NewBB}});
+
+  // Update any other PHI nodes in BB.
+  for (BasicBlock::iterator BI = BB->begin();
+       PHINode *Phi = dyn_cast<PHINode>(BI); ++BI)
+    if (Phi != SIUse)
+      Phi->addIncoming(Phi->getIncomingValueForBlock(Pred), NewBB);
+}
+
+bool JumpThreadingPass::TryToUnfoldSelect(SwitchInst *SI, BasicBlock *BB) {
+  PHINode *CondPHI = dyn_cast<PHINode>(SI->getCondition());
+
+  if (!CondPHI || CondPHI->getParent() != BB)
+    return false;
+
+  for (unsigned I = 0, E = CondPHI->getNumIncomingValues(); I != E; ++I) {
+    BasicBlock *Pred = CondPHI->getIncomingBlock(I);
+    SelectInst *PredSI = dyn_cast<SelectInst>(CondPHI->getIncomingValue(I));
+
+    // The second and third condition can be potentially relaxed. Currently
+    // the conditions help to simplify the code and allow us to reuse existing
+    // code, developed for TryToUnfoldSelect(CmpInst *, BasicBlock *)
+    if (!PredSI || PredSI->getParent() != Pred || !PredSI->hasOneUse())
+      continue;
+
+    BranchInst *PredTerm = dyn_cast<BranchInst>(Pred->getTerminator());
+    if (!PredTerm || !PredTerm->isUnconditional())
+      continue;
+
+    UnfoldSelectInstr(Pred, BB, PredSI, CondPHI, I);
+    return true;
+  }
+  return false;
 }
 
 /// TryToUnfoldSelect - Look for blocks of the form
@@ -2439,34 +2513,7 @@ bool JumpThreadingPass::TryToUnfoldSelect(CmpInst *CondCmp, BasicBlock *BB) {
     if ((LHSFolds != LazyValueInfo::Unknown ||
          RHSFolds != LazyValueInfo::Unknown) &&
         LHSFolds != RHSFolds) {
-      // Expand the select.
-      //
-      // Pred --
-      //  |    v
-      //  |  NewBB
-      //  |    |
-      //  |-----
-      //  v
-      // BB
-      BasicBlock *NewBB = BasicBlock::Create(BB->getContext(), "select.unfold",
-                                             BB->getParent(), BB);
-      // Move the unconditional branch to NewBB.
-      PredTerm->removeFromParent();
-      NewBB->getInstList().insert(NewBB->end(), PredTerm);
-      // Create a conditional branch and update PHI nodes.
-      BranchInst::Create(NewBB, BB, SI->getCondition(), Pred);
-      CondLHS->setIncomingValue(I, SI->getFalseValue());
-      CondLHS->addIncoming(SI->getTrueValue(), NewBB);
-      // The select is now dead.
-      SI->eraseFromParent();
-
-      DTU->applyUpdates({{DominatorTree::Insert, NewBB, BB},
-                         {DominatorTree::Insert, Pred, NewBB}});
-      // Update any other PHI nodes in BB.
-      for (BasicBlock::iterator BI = BB->begin();
-           PHINode *Phi = dyn_cast<PHINode>(BI); ++BI)
-        if (Phi != CondLHS)
-          Phi->addIncoming(Phi->getIncomingValueForBlock(Pred), NewBB);
+      UnfoldSelectInstr(Pred, BB, SI, CondLHS, I);
       return true;
     }
   }
@@ -2558,7 +2605,7 @@ bool JumpThreadingPass::TryToUnfoldSelectInCurrBB(BasicBlock *BB) {
       Updates.push_back({DominatorTree::Delete, BB, Succ});
       Updates.push_back({DominatorTree::Insert, SplitBB, Succ});
     }
-    DTU->applyUpdates(Updates);
+    DTU->applyUpdatesPermissive(Updates);
     return true;
   }
   return false;
@@ -2655,28 +2702,16 @@ bool JumpThreadingPass::ThreadGuard(BasicBlock *BB, IntrinsicInst *Guard,
   // Duplicate all instructions before the guard and the guard itself to the
   // branch where implication is not proved.
   BasicBlock *GuardedBlock = DuplicateInstructionsInSplitBetween(
-      BB, PredGuardedBlock, AfterGuard, GuardedMapping);
+      BB, PredGuardedBlock, AfterGuard, GuardedMapping, *DTU);
   assert(GuardedBlock && "Could not create the guarded block?");
   // Duplicate all instructions before the guard in the unguarded branch.
   // Since we have successfully duplicated the guarded block and this block
   // has fewer instructions, we expect it to succeed.
   BasicBlock *UnguardedBlock = DuplicateInstructionsInSplitBetween(
-      BB, PredUnguardedBlock, Guard, UnguardedMapping);
+      BB, PredUnguardedBlock, Guard, UnguardedMapping, *DTU);
   assert(UnguardedBlock && "Could not create the unguarded block?");
   LLVM_DEBUG(dbgs() << "Moved guard " << *Guard << " to block "
                     << GuardedBlock->getName() << "\n");
-  // DuplicateInstructionsInSplitBetween inserts a new block "BB.split" between
-  // PredBB and BB. We need to perform two inserts and one delete for each of
-  // the above calls to update Dominators.
-  DTU->applyUpdates(
-      {// Guarded block split.
-       {DominatorTree::Delete, PredGuardedBlock, BB},
-       {DominatorTree::Insert, PredGuardedBlock, GuardedBlock},
-       {DominatorTree::Insert, GuardedBlock, BB},
-       // Unguarded block split.
-       {DominatorTree::Delete, PredUnguardedBlock, BB},
-       {DominatorTree::Insert, PredUnguardedBlock, UnguardedBlock},
-       {DominatorTree::Insert, UnguardedBlock, BB}});
   // Some instructions before the guard may still have uses. For them, we need
   // to create Phi nodes merging their copies in both guarded and unguarded
   // branches. Those instructions that have no uses can be just removed.

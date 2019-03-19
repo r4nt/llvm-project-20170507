@@ -1,9 +1,8 @@
 //===-- IndexTests.cpp  -------------------------------*- C++ -*-----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,17 +13,19 @@
 #include "index/Index.h"
 #include "index/MemIndex.h"
 #include "index/Merge.h"
+#include "index/Symbol.h"
+#include "clang/Index/IndexSymbol.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
 using testing::_;
 using testing::AllOf;
+using testing::AnyOf;
 using testing::ElementsAre;
 using testing::Pair;
 using testing::Pointee;
 using testing::UnorderedElementsAre;
 
-using namespace llvm;
 namespace clang {
 namespace clangd {
 namespace {
@@ -36,7 +37,7 @@ MATCHER_P(RefRange, Range, "") {
          std::make_tuple(Range.start.line, Range.start.character,
                          Range.end.line, Range.end.character);
 }
-MATCHER_P(FileURI, F, "") { return arg.Location.FileURI == F; }
+MATCHER_P(FileURI, F, "") { return StringRef(arg.Location.FileURI) == F; }
 
 TEST(SymbolLocation, Position) {
   using Position = SymbolLocation::Position;
@@ -90,6 +91,7 @@ TEST(MemIndexTest, MemIndexDeduplicate) {
                                  symbol("2") /* duplicate */};
   FuzzyFindRequest Req;
   Req.Query = "2";
+  Req.AnyScope = true;
   MemIndex I(Symbols, RefSlab());
   EXPECT_THAT(match(I, Req), ElementsAre("2"));
 }
@@ -98,6 +100,7 @@ TEST(MemIndexTest, MemIndexLimitedNumMatches) {
   auto I = MemIndex::build(generateNumSymbols(0, 100), RefSlab());
   FuzzyFindRequest Req;
   Req.Query = "5";
+  Req.AnyScope = true;
   Req.Limit = 3;
   bool Incomplete;
   auto Matches = match(*I, Req, &Incomplete);
@@ -112,6 +115,7 @@ TEST(MemIndexTest, FuzzyMatch) {
       RefSlab());
   FuzzyFindRequest Req;
   Req.Query = "lol";
+  Req.AnyScope = true;
   Req.Limit = 2;
   EXPECT_THAT(match(*I, Req),
               UnorderedElementsAre("LaughingOutLoud", "LittleOldLady"));
@@ -122,6 +126,7 @@ TEST(MemIndexTest, MatchQualifiedNamesWithoutSpecificScope) {
       MemIndex::build(generateSymbols({"a::y1", "b::y2", "y3"}), RefSlab());
   FuzzyFindRequest Req;
   Req.Query = "y";
+  Req.AnyScope = true;
   EXPECT_THAT(match(*I, Req), UnorderedElementsAre("a::y1", "b::y2", "y3"));
 }
 
@@ -178,6 +183,41 @@ TEST(MemIndexTest, Lookup) {
   EXPECT_THAT(lookup(*I, SymbolID("ns::nonono")), UnorderedElementsAre());
 }
 
+TEST(MemIndexTest, TemplateSpecialization) {
+  SymbolSlab::Builder B;
+
+  Symbol S = symbol("TempSpec");
+  S.ID = SymbolID("0");
+  B.insert(S);
+
+  S = symbol("TempSpec");
+  S.ID = SymbolID("1");
+  S.SymInfo.Properties = static_cast<index::SymbolPropertySet>(
+      index::SymbolProperty::TemplateSpecialization);
+  B.insert(S);
+
+  S = symbol("TempSpec");
+  S.ID = SymbolID("2");
+  S.SymInfo.Properties = static_cast<index::SymbolPropertySet>(
+      index::SymbolProperty::TemplatePartialSpecialization);
+  B.insert(S);
+
+  auto I = MemIndex::build(std::move(B).build(), RefSlab());
+  FuzzyFindRequest Req;
+  Req.Query = "TempSpec";
+  Req.AnyScope = true;
+
+  std::vector<Symbol> Symbols;
+  I->fuzzyFind(Req, [&Symbols](const Symbol &Sym) { Symbols.push_back(Sym); });
+  EXPECT_EQ(Symbols.size(), 1U);
+  EXPECT_FALSE(Symbols.front().SymInfo.Properties &
+               static_cast<index::SymbolPropertySet>(
+                   index::SymbolProperty::TemplateSpecialization));
+  EXPECT_FALSE(Symbols.front().SymInfo.Properties &
+               static_cast<index::SymbolPropertySet>(
+                   index::SymbolProperty::TemplatePartialSpecialization));
+}
+
 TEST(MergeIndexTest, Lookup) {
   auto I = MemIndex::build(generateSymbols({"ns::A", "ns::B"}), RefSlab()),
        J = MemIndex::build(generateSymbols({"ns::B", "ns::C"}), RefSlab());
@@ -215,14 +255,16 @@ TEST(MergeTest, Merge) {
   R.Documentation = "--doc--";
   L.Origin = SymbolOrigin::Dynamic;
   R.Origin = SymbolOrigin::Static;
+  R.Type = "expectedType";
 
   Symbol M = mergeSymbol(L, R);
   EXPECT_EQ(M.Name, "Foo");
-  EXPECT_EQ(M.CanonicalDeclaration.FileURI, "file:///left.h");
+  EXPECT_EQ(StringRef(M.CanonicalDeclaration.FileURI), "file:///left.h");
   EXPECT_EQ(M.References, 3u);
   EXPECT_EQ(M.Signature, "()");
   EXPECT_EQ(M.CompletionSnippetSuffix, "{$1:0}");
   EXPECT_EQ(M.Documentation, "--doc--");
+  EXPECT_EQ(M.Type, "expectedType");
   EXPECT_EQ(M.Origin,
             SymbolOrigin::Dynamic | SymbolOrigin::Static | SymbolOrigin::Merge);
 }
@@ -237,20 +279,36 @@ TEST(MergeTest, PreferSymbolWithDefn) {
   R.Name = "right";
 
   Symbol M = mergeSymbol(L, R);
-  EXPECT_EQ(M.CanonicalDeclaration.FileURI, "file:/left.h");
-  EXPECT_EQ(M.Definition.FileURI, "");
+  EXPECT_EQ(StringRef(M.CanonicalDeclaration.FileURI), "file:/left.h");
+  EXPECT_EQ(StringRef(M.Definition.FileURI), "");
   EXPECT_EQ(M.Name, "left");
 
   R.Definition.FileURI = "file:/right.cpp"; // Now right will be favored.
   M = mergeSymbol(L, R);
-  EXPECT_EQ(M.CanonicalDeclaration.FileURI, "file:/right.h");
-  EXPECT_EQ(M.Definition.FileURI, "file:/right.cpp");
+  EXPECT_EQ(StringRef(M.CanonicalDeclaration.FileURI), "file:/right.h");
+  EXPECT_EQ(StringRef(M.Definition.FileURI), "file:/right.cpp");
   EXPECT_EQ(M.Name, "right");
 }
 
+TEST(MergeTest, PreferSymbolLocationInCodegenFile) {
+  Symbol L, R;
+
+  L.ID = R.ID = SymbolID("hello");
+  L.CanonicalDeclaration.FileURI = "file:/x.proto.h";
+  R.CanonicalDeclaration.FileURI = "file:/x.proto";
+
+  Symbol M = mergeSymbol(L, R);
+  EXPECT_EQ(StringRef(M.CanonicalDeclaration.FileURI), "file:/x.proto");
+
+  // Prefer L if both have codegen suffix.
+  L.CanonicalDeclaration.FileURI = "file:/y.proto";
+  M = mergeSymbol(L, R);
+  EXPECT_EQ(StringRef(M.CanonicalDeclaration.FileURI), "file:/y.proto");
+}
+
 TEST(MergeIndexTest, Refs) {
-  FileIndex Dyn({"unittest"});
-  FileIndex StaticIndex({"unittest"});
+  FileIndex Dyn;
+  FileIndex StaticIndex;
   MergedIndex Merge(&Dyn, &StaticIndex);
 
   const char *HeaderCode = "class Foo;";
@@ -287,7 +345,6 @@ TEST(MergeIndexTest, Refs) {
   Request.IDs = {Foo.ID};
   RefSlab::Builder Results;
   Merge.refs(Request, [&](const Ref &O) { Results.insert(Foo.ID, O); });
-
   EXPECT_THAT(
       std::move(Results).build(),
       ElementsAre(Pair(
@@ -295,9 +352,17 @@ TEST(MergeIndexTest, Refs) {
                                         FileURI("unittest:///test.cc")),
                                   AllOf(RefRange(Test2Code.range("Foo")),
                                         FileURI("unittest:///test2.cc"))))));
+
+  Request.Limit = 1;
+  RefSlab::Builder Results2;
+  Merge.refs(Request, [&](const Ref &O) { Results2.insert(Foo.ID, O); });
+  EXPECT_THAT(std::move(Results2).build(),
+              ElementsAre(Pair(
+                  _, ElementsAre(AnyOf(FileURI("unittest:///test.cc"),
+                                       FileURI("unittest:///test2.cc"))))));
 }
 
-MATCHER_P2(IncludeHeaderWithRef, IncludeHeader, References,  "") {
+MATCHER_P2(IncludeHeaderWithRef, IncludeHeader, References, "") {
   return (arg.IncludeHeader == IncludeHeader) && (arg.References == References);
 }
 

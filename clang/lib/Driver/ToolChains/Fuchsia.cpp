@@ -1,9 +1,8 @@
 //===--- Fuchsia.cpp - Fuchsia ToolChain Implementations --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -109,8 +108,8 @@ void fuchsia::Linker::ConstructJob(Compilation &C, const JobAction &JA,
                   D.getLTOMode() == LTOK_Thin);
   }
 
-  addSanitizerRuntimes(ToolChain, Args, CmdArgs);
-
+  bool NeedsSanitizerDeps = addSanitizerRuntimes(ToolChain, Args, CmdArgs);
+  bool NeedsXRayDeps = addXRayRuntime(ToolChain, Args, CmdArgs);
   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
   ToolChain.addProfileRTLibs(Args, CmdArgs);
 
@@ -125,12 +124,20 @@ void fuchsia::Linker::ConstructJob(Compilation &C, const JobAction &JA,
         CmdArgs.push_back("--push-state");
         CmdArgs.push_back("--as-needed");
         if (OnlyLibstdcxxStatic)
-          CmdArgs.push_back("-static");
+          CmdArgs.push_back("-Bstatic");
         ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
+        if (OnlyLibstdcxxStatic)
+          CmdArgs.push_back("-Bdynamic");
         CmdArgs.push_back("-lm");
         CmdArgs.push_back("--pop-state");
       }
     }
+
+    if (NeedsSanitizerDeps)
+      linkSanitizerRuntimeDeps(ToolChain, CmdArgs);
+
+    if (NeedsXRayDeps)
+      linkXRayRuntimeDeps(ToolChain, CmdArgs);
 
     AddRunTimeLibs(ToolChain, D, CmdArgs, Args);
 
@@ -141,7 +148,8 @@ void fuchsia::Linker::ConstructJob(Compilation &C, const JobAction &JA,
     if (Args.hasArg(options::OPT_fsplit_stack))
       CmdArgs.push_back("--wrap=pthread_create");
 
-    CmdArgs.push_back("-lc");
+    if (!Args.hasArg(options::OPT_nolibc))
+      CmdArgs.push_back("-lc");
   }
 
   C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));

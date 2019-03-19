@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -31,16 +30,16 @@ constexpr bool testConstexpr()
     return true;
 }
 
-int main()
+int main(int, char**)
 {
     using month = std::chrono::month;
-    
+
     ASSERT_NOEXCEPT(--(std::declval<month&>())  );
     ASSERT_NOEXCEPT(  (std::declval<month&>())--);
 
     ASSERT_SAME_TYPE(month , decltype(  std::declval<month&>()--));
     ASSERT_SAME_TYPE(month&, decltype(--std::declval<month&>()  ));
-    
+
     static_assert(testConstexpr<month>(), "");
 
     for (unsigned i = 10; i <= 20; ++i)
@@ -50,4 +49,6 @@ int main()
         assert(static_cast<unsigned>(month--) == i - 1);
         assert(static_cast<unsigned>(month)   == i - 2);
     }
+
+  return 0;
 }

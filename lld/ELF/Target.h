@@ -1,9 +1,8 @@
 //===- Target.h -------------------------------------------------*- C++ -*-===//
 //
-//                             The LLVM Linker
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,6 +13,7 @@
 #include "lld/Common/ErrorHandler.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Support/MathExtras.h"
+#include <array>
 
 namespace lld {
 std::string toString(elf::RelType Type);
@@ -32,6 +32,7 @@ public:
   virtual void writeGotPlt(uint8_t *Buf, const Symbol &S) const {};
   virtual void writeIgotPlt(uint8_t *Buf, const Symbol &S) const;
   virtual int64_t getImplicitAddend(const uint8_t *Buf, RelType Type) const;
+  virtual int getTlsGdRelaxSkip(RelType Type) const { return 1; }
 
   // If lazy binding is supported, the first entry of the PLT has code
   // to call the dynamic linker to resolve PLT entries the first time
@@ -43,10 +44,6 @@ public:
                         unsigned RelOff) const {}
   virtual void addPltHeaderSymbols(InputSection &IS) const {}
   virtual void addPltSymbols(InputSection &IS, uint64_t Off) const {}
-
-  unsigned getPltEntryOffset(unsigned Index) const {
-    return Index * PltEntrySize + PltHeaderSize;
-  }
 
   // Returns true if a relocation only uses the low bits of a value such that
   // all those bits are in the same page. For example, if the relocation
@@ -84,7 +81,6 @@ public:
 
   virtual ~TargetInfo();
 
-  unsigned TlsGdRelaxSkip = 1;
   unsigned PageSize = 4096;
   unsigned DefaultMaxPageSize = 4096;
 
@@ -121,7 +117,7 @@ public:
 
   // A 4-byte field corresponding to one or more trap instructions, used to pad
   // executable OutputSections.
-  uint32_t TrapInstr = 0;
+  std::array<uint8_t, 4> TrapInstr;
 
   // If a target needs to rewrite calls to __morestack to instead call
   // __morestack_non_split when a split-stack enabled caller calls a
@@ -149,6 +145,7 @@ TargetInfo *getAMDGPUTargetInfo();
 TargetInfo *getARMTargetInfo();
 TargetInfo *getAVRTargetInfo();
 TargetInfo *getHexagonTargetInfo();
+TargetInfo *getMSP430TargetInfo();
 TargetInfo *getPPC64TargetInfo();
 TargetInfo *getPPCTargetInfo();
 TargetInfo *getRISCVTargetInfo();
@@ -179,6 +176,10 @@ static inline std::string getErrorLocation(const uint8_t *Loc) {
 // to the local entry-point.
 unsigned getPPC64GlobalEntryToLocalEntryOffset(uint8_t StOther);
 
+// Returns true if a relocation is a small code model relocation that accesses
+// the .toc section.
+bool isPPC64SmallCodeModelTocReloc(RelType Type);
+
 uint64_t getPPC64TocBase();
 uint64_t getAArch64Page(uint64_t Expr);
 
@@ -195,9 +196,13 @@ static inline void reportRangeError(uint8_t *Loc, RelType Type, const Twine &V,
     Hint = "; consider recompiling with -fdebug-types-section to reduce size "
            "of debug sections";
 
-  error(ErrPlace.Loc + "relocation " + lld::toString(Type) +
-        " out of range: " + V.str() + " is not in [" + Twine(Min).str() + ", " +
-        Twine(Max).str() + "]" + Hint);
+  errorOrWarn(ErrPlace.Loc + "relocation " + lld::toString(Type) +
+              " out of range: " + V.str() + " is not in [" + Twine(Min).str() +
+              ", " + Twine(Max).str() + "]" + Hint);
+}
+
+inline unsigned getPltEntryOffset(unsigned Idx) {
+  return Target->PltHeaderSize + Target->PltEntrySize * Idx;
 }
 
 // Make sure that V can be represented as an N bit signed integer.

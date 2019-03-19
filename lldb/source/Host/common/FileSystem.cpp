@@ -1,9 +1,8 @@
 //===-- FileSystem.cpp ------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -12,7 +11,9 @@
 #include "lldb/Utility/LLDBAssert.h"
 #include "lldb/Utility/TildeExpressionResolver.h"
 
+#include "llvm/Support/Errc.h"
 #include "llvm/Support/Errno.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
@@ -48,6 +49,26 @@ void FileSystem::Initialize() {
   InstanceImpl().emplace();
 }
 
+void FileSystem::Initialize(FileCollector &collector) {
+  lldbassert(!InstanceImpl() && "Already initialized.");
+  InstanceImpl().emplace(collector);
+}
+
+llvm::Error FileSystem::Initialize(const FileSpec &mapping) {
+  lldbassert(!InstanceImpl() && "Already initialized.");
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+      llvm::vfs::getRealFileSystem()->getBufferForFile(mapping.GetPath());
+
+  if (!buffer)
+    return llvm::errorCodeToError(buffer.getError());
+
+  InstanceImpl().emplace(
+      llvm::vfs::getVFSFromYAML(std::move(buffer.get()), nullptr, ""), true);
+
+  return llvm::Error::success();
+}
+
 void FileSystem::Initialize(IntrusiveRefCntPtr<vfs::FileSystem> fs) {
   lldbassert(!InstanceImpl() && "Already initialized.");
   InstanceImpl().emplace(fs);
@@ -61,6 +82,25 @@ void FileSystem::Terminate() {
 Optional<FileSystem> &FileSystem::InstanceImpl() {
   static Optional<FileSystem> g_fs;
   return g_fs;
+}
+
+vfs::directory_iterator FileSystem::DirBegin(const FileSpec &file_spec,
+                                             std::error_code &ec) {
+  return DirBegin(file_spec.GetPath(), ec);
+}
+
+vfs::directory_iterator FileSystem::DirBegin(const Twine &dir,
+                                             std::error_code &ec) {
+  return m_fs->dir_begin(dir, ec);
+}
+
+llvm::ErrorOr<vfs::Status>
+FileSystem::GetStatus(const FileSpec &file_spec) const {
+  return GetStatus(file_spec.GetPath());
+}
+
+llvm::ErrorOr<vfs::Status> FileSystem::GetStatus(const Twine &path) const {
+  return m_fs->status(path);
 }
 
 sys::TimePoint<>
@@ -122,6 +162,27 @@ bool FileSystem::Readable(const Twine &path) const {
 
 bool FileSystem::Readable(const FileSpec &file_spec) const {
   return Readable(file_spec.GetPath());
+}
+
+bool FileSystem::IsDirectory(const Twine &path) const {
+  ErrorOr<vfs::Status> status = m_fs->status(path);
+  if (!status)
+    return false;
+  return status->isDirectory();
+}
+
+bool FileSystem::IsDirectory(const FileSpec &file_spec) const {
+  return IsDirectory(file_spec.GetPath());
+}
+
+bool FileSystem::IsLocal(const Twine &path) const {
+  bool b = false;
+  m_fs->isLocal(path, b);
+  return b;
+}
+
+bool FileSystem::IsLocal(const FileSpec &file_spec) const {
+  return IsLocal(file_spec.GetPath());
 }
 
 void FileSystem::EnumerateDirectory(Twine path, bool find_directories,
@@ -203,18 +264,56 @@ void FileSystem::Resolve(FileSpec &file_spec) {
   Resolve(path);
 
   // Update the FileSpec with the resolved path.
-  file_spec.SetPath(path);
+  if (file_spec.GetFilename().IsEmpty())
+    file_spec.GetDirectory().SetString(path);
+  else
+    file_spec.SetPath(path);
   file_spec.SetIsResolved(true);
+}
+
+std::shared_ptr<DataBufferLLVM>
+FileSystem::CreateDataBuffer(const llvm::Twine &path, uint64_t size,
+                             uint64_t offset) {
+  if (m_collector)
+    m_collector->AddFile(path);
+
+  const bool is_volatile = !IsLocal(path);
+  const ErrorOr<std::string> external_path = GetExternalPath(path);
+
+  if (!external_path)
+    return nullptr;
+
+  std::unique_ptr<llvm::WritableMemoryBuffer> buffer;
+  if (size == 0) {
+    auto buffer_or_error =
+        llvm::WritableMemoryBuffer::getFile(*external_path, -1, is_volatile);
+    if (!buffer_or_error)
+      return nullptr;
+    buffer = std::move(*buffer_or_error);
+  } else {
+    auto buffer_or_error = llvm::WritableMemoryBuffer::getFileSlice(
+        *external_path, size, offset, is_volatile);
+    if (!buffer_or_error)
+      return nullptr;
+    buffer = std::move(*buffer_or_error);
+  }
+  return std::shared_ptr<DataBufferLLVM>(new DataBufferLLVM(std::move(buffer)));
+}
+
+std::shared_ptr<DataBufferLLVM>
+FileSystem::CreateDataBuffer(const FileSpec &file_spec, uint64_t size,
+                             uint64_t offset) {
+  return CreateDataBuffer(file_spec.GetPath(), size, offset);
 }
 
 bool FileSystem::ResolveExecutableLocation(FileSpec &file_spec) {
   // If the directory is set there's nothing to do.
-  const ConstString &directory = file_spec.GetDirectory();
+  ConstString directory = file_spec.GetDirectory();
   if (directory)
     return false;
 
   // We cannot look for a file if there's no file name.
-  const ConstString &filename = file_spec.GetFilename();
+  ConstString filename = file_spec.GetFilename();
   if (!filename)
     return false;
 
@@ -312,25 +411,56 @@ static mode_t GetOpenMode(uint32_t permissions) {
 }
 
 Status FileSystem::Open(File &File, const FileSpec &file_spec, uint32_t options,
-                        uint32_t permissions) {
+                        uint32_t permissions, bool should_close_fd) {
+  if (m_collector)
+    m_collector->AddFile(file_spec);
+
   if (File.IsValid())
     File.Close();
 
   const int open_flags = GetOpenFlags(options);
   const mode_t open_mode =
       (open_flags & O_CREAT) ? GetOpenMode(permissions) : 0;
-  const std::string path = file_spec.GetPath();
+
+  auto path = GetExternalPath(file_spec);
+  if (!path)
+    return Status(path.getError());
 
   int descriptor = llvm::sys::RetryAfterSignal(
-      -1, OpenWithFS, *this, path.c_str(), open_flags, open_mode);
+      -1, OpenWithFS, *this, path->c_str(), open_flags, open_mode);
 
   Status error;
   if (!File::DescriptorIsValid(descriptor)) {
     File.SetDescriptor(descriptor, false);
     error.SetErrorToErrno();
   } else {
-    File.SetDescriptor(descriptor, true);
+    File.SetDescriptor(descriptor, should_close_fd);
     File.SetOptions(options);
   }
   return error;
+}
+
+ErrorOr<std::string> FileSystem::GetExternalPath(const llvm::Twine &path) {
+  if (!m_mapped)
+    return path.str();
+
+  // If VFS mapped we know the underlying FS is a RedirectingFileSystem.
+  ErrorOr<vfs::RedirectingFileSystem::Entry *> E =
+      static_cast<vfs::RedirectingFileSystem &>(*m_fs).lookupPath(path);
+  if (!E) {
+    if (E.getError() == llvm::errc::no_such_file_or_directory) {
+      return path.str();
+    }
+    return E.getError();
+  }
+
+  auto *F = dyn_cast<vfs::RedirectingFileSystem::RedirectingFileEntry>(*E);
+  if (!F)
+    return make_error_code(llvm::errc::not_supported);
+
+  return F->getExternalContentsPath().str();
+}
+
+ErrorOr<std::string> FileSystem::GetExternalPath(const FileSpec &file_spec) {
+  return GetExternalPath(file_spec.GetPath());
 }

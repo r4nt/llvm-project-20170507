@@ -1,9 +1,8 @@
 //===--- Protocol.h - Language Server Protocol Implementation ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -25,6 +24,8 @@
 #define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PROTOCOL_H
 
 #include "URI.h"
+#include "index/SymbolID.h"
+#include "clang/Index/IndexSymbol.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Support/JSON.h"
 #include <bitset>
@@ -66,9 +67,25 @@ public:
   }
 };
 
+// URI in "file" scheme for a file.
 struct URIForFile {
   URIForFile() = default;
-  explicit URIForFile(std::string AbsPath);
+
+  /// Canonicalizes \p AbsPath via URI.
+  ///
+  /// File paths in URIForFile can come from index or local AST. Path from
+  /// index goes through URI transformation, and the final path is resolved by
+  /// URI scheme and could potentially be different from the original path.
+  /// Hence, we do the same transformation for all paths.
+  ///
+  /// Files can be referred to by several paths (e.g. in the presence of links).
+  /// Which one we prefer may depend on where we're coming from. \p TUPath is a
+  /// hint, and should usually be the main entrypoint file we're processing.
+  static URIForFile canonicalize(llvm::StringRef AbsPath,
+                                 llvm::StringRef TUPath);
+
+  static llvm::Expected<URIForFile> fromURI(const URI &U,
+                                            llvm::StringRef HintPath);
 
   /// Retrieves absolute path to the file.
   llvm::StringRef file() const { return File; }
@@ -89,6 +106,8 @@ struct URIForFile {
   }
 
 private:
+  explicit URIForFile(std::string &&File) : File(std::move(File)) {}
+
   std::string File;
 };
 
@@ -150,6 +169,9 @@ struct Range {
   }
 
   bool contains(Position Pos) const { return start <= Pos && Pos < end; }
+  bool contains(Range Rng) const {
+    return start <= Rng.start && Rng.end <= end;
+  }
 };
 bool fromJSON(const llvm::json::Value &, Range &);
 llvm::json::Value toJSON(const Range &);
@@ -310,6 +332,12 @@ bool fromJSON(const llvm::json::Value &, SymbolKindBitset &);
 SymbolKind adjustKindToCapability(SymbolKind Kind,
                                   SymbolKindBitset &supportedSymbolKinds);
 
+// Convert a index::SymbolKind to clangd::SymbolKind (LSP)
+// Note, some are not perfect matches and should be improved when this LSP
+// issue is addressed:
+// https://github.com/Microsoft/language-server-protocol/issues/344
+SymbolKind indexSymbolKindToSymbolKind(index::SymbolKind Kind);
+
 // This struct doesn't mirror LSP!
 // The protocol defines deeply nested structures for client capabilities.
 // Instead of mapping them all, this just parses out the bits we care about.
@@ -330,6 +358,9 @@ struct ClientCapabilities {
   /// Client supports snippets as insert text.
   /// textDocument.completion.completionItem.snippetSupport
   bool CompletionSnippets = false;
+
+  /// Client supports hierarchical document symbols.
+  bool HierarchicalDocumentSymbol = false;
 
   /// The supported set of CompletionItemKinds for textDocument/completion.
   /// textDocument.completion.completionItemKind.valueSet
@@ -372,6 +403,9 @@ struct InitializationOptions {
   // the compilation database doesn't describe an opened file.
   // The command used will be approximately `clang $FILE $fallbackFlags`.
   std::vector<std::string> fallbackFlags;
+
+  /// Clients supports show file status for textDocument/clangd.fileStatus.
+  bool FileStatus = false;
 };
 bool fromJSON(const llvm::json::Value &, InitializationOptions &);
 
@@ -604,6 +638,21 @@ struct WorkspaceEdit {
 bool fromJSON(const llvm::json::Value &, WorkspaceEdit &);
 llvm::json::Value toJSON(const WorkspaceEdit &WE);
 
+/// Arguments for the 'applyTweak' command. The server sends these commands as a
+/// response to the textDocument/codeAction request. The client can later send a
+/// command back to the server if the user requests to execute a particular code
+/// tweak.
+struct TweakArgs {
+  /// A file provided by the client on a textDocument/codeAction request.
+  URIForFile file;
+  /// A selection provided by the client on a textDocument/codeAction request.
+  Range selection;
+  /// ID of the tweak that should be executed. Corresponds to Tweak::id().
+  std::string tweakID;
+};
+bool fromJSON(const llvm::json::Value &, TweakArgs &);
+llvm::json::Value toJSON(const TweakArgs &A);
+
 /// Exact commands are not specified in the protocol so we define the
 /// ones supported by Clangd here. The protocol specifies the command arguments
 /// to be "any[]" but to make this safer and more manageable, each command we
@@ -615,12 +664,15 @@ llvm::json::Value toJSON(const WorkspaceEdit &WE);
 struct ExecuteCommandParams {
   // Command to apply fix-its. Uses WorkspaceEdit as argument.
   const static llvm::StringLiteral CLANGD_APPLY_FIX_COMMAND;
+  // Command to apply the code action. Uses TweakArgs as argument.
+  const static llvm::StringLiteral CLANGD_APPLY_TWEAK;
 
   /// The command identifier, e.g. CLANGD_APPLY_FIX_COMMAND
   std::string command;
 
   // Arguments
   llvm::Optional<WorkspaceEdit> workspaceEdit;
+  llvm::Optional<TweakArgs> tweakArgs;
 };
 bool fromJSON(const llvm::json::Value &, ExecuteCommandParams &);
 
@@ -642,6 +694,7 @@ struct CodeAction {
   /// Used to filter code actions.
   llvm::Optional<std::string> kind;
   const static llvm::StringLiteral QUICKFIX_KIND;
+  const static llvm::StringLiteral REFACTOR_KIND;
 
   /// The diagnostics that this code action resolves.
   llvm::Optional<std::vector<Diagnostic>> diagnostics;
@@ -654,6 +707,39 @@ struct CodeAction {
   llvm::Optional<Command> command;
 };
 llvm::json::Value toJSON(const CodeAction &);
+
+/// Represents programming constructs like variables, classes, interfaces etc.
+/// that appear in a document. Document symbols can be hierarchical and they
+/// have two ranges: one that encloses its definition and one that points to its
+/// most interesting range, e.g. the range of an identifier.
+struct DocumentSymbol {
+  /// The name of this symbol.
+  std::string name;
+
+  /// More detail for this symbol, e.g the signature of a function.
+  std::string detail;
+
+  /// The kind of this symbol.
+  SymbolKind kind;
+
+  /// Indicates if this symbol is deprecated.
+  bool deprecated;
+
+  /// The range enclosing this symbol not including leading/trailing whitespace
+  /// but everything else like comments. This information is typically used to
+  /// determine if the clients cursor is inside the symbol to reveal in the
+  /// symbol in the UI.
+  Range range;
+
+  /// The range that should be selected and revealed when this symbol is being
+  /// picked, e.g the name of a function. Must be contained by the `range`.
+  Range selectionRange;
+
+  /// Children of this symbol, e.g. properties of a class.
+  std::vector<DocumentSymbol> children;
+};
+llvm::raw_ostream &operator<<(llvm::raw_ostream &O, const DocumentSymbol &S);
+llvm::json::Value toJSON(const DocumentSymbol &S);
 
 /// Represents information about programming constructs like variables, classes,
 /// interfaces etc.
@@ -672,6 +758,26 @@ struct SymbolInformation {
 };
 llvm::json::Value toJSON(const SymbolInformation &);
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const SymbolInformation &);
+
+/// Represents information about identifier.
+/// This is returned from textDocument/symbolInfo, which is a clangd extension.
+struct SymbolDetails {
+  std::string name;
+
+  std::string containerName;
+
+  /// Unified Symbol Resolution identifier
+  /// This is an opaque string uniquely identifying a symbol.
+  /// Unlike SymbolID, it is variable-length and somewhat human-readable.
+  /// It is a common representation across several clang tools.
+  /// (See USRGeneration.h)
+  std::string USR;
+
+  llvm::Optional<SymbolID> ID;
+};
+llvm::json::Value toJSON(const SymbolDetails &);
+llvm::raw_ostream &operator<<(llvm::raw_ostream &, const SymbolDetails &);
+bool operator==(const SymbolDetails &, const SymbolDetails &);
 
 /// The parameters of a Workspace Symbol Request.
 struct WorkspaceSymbolParams {
@@ -693,6 +799,31 @@ struct TextDocumentPositionParams {
   Position position;
 };
 bool fromJSON(const llvm::json::Value &, TextDocumentPositionParams &);
+
+enum class CompletionTriggerKind {
+  /// Completion was triggered by typing an identifier (24x7 code
+  /// complete), manual invocation (e.g Ctrl+Space) or via API.
+  Invoked = 1,
+  /// Completion was triggered by a trigger character specified by
+  /// the `triggerCharacters` properties of the `CompletionRegistrationOptions`.
+  TriggerCharacter = 2,
+  /// Completion was re-triggered as the current completion list is incomplete.
+  TriggerTriggerForIncompleteCompletions = 3
+};
+
+struct CompletionContext {
+  /// How the completion was triggered.
+  CompletionTriggerKind triggerKind = CompletionTriggerKind::Invoked;
+  /// The trigger character (a single character) that has trigger code complete.
+  /// Is undefined if `triggerKind !== CompletionTriggerKind.TriggerCharacter`
+  std::string triggerCharacter;
+};
+bool fromJSON(const llvm::json::Value &, CompletionContext &);
+
+struct CompletionParams : TextDocumentPositionParams {
+  CompletionContext context;
+};
+bool fromJSON(const llvm::json::Value &, CompletionParams &);
 
 enum class MarkupKind {
   PlainText,
@@ -890,10 +1021,83 @@ struct DocumentHighlight {
 llvm::json::Value toJSON(const DocumentHighlight &DH);
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const DocumentHighlight &);
 
+enum class TypeHierarchyDirection { Children = 0, Parents = 1, Both = 2 };
+bool fromJSON(const llvm::json::Value &E, TypeHierarchyDirection &Out);
+
+/// The type hierarchy params is an extension of the
+/// `TextDocumentPositionsParams` with optional properties which can be used to
+/// eagerly resolve the item when requesting from the server.
+struct TypeHierarchyParams : public TextDocumentPositionParams {
+  /// The hierarchy levels to resolve. `0` indicates no level.
+  int resolve = 0;
+
+  /// The direction of the hierarchy levels to resolve.
+  TypeHierarchyDirection direction = TypeHierarchyDirection::Parents;
+};
+bool fromJSON(const llvm::json::Value &, TypeHierarchyParams &);
+
+struct TypeHierarchyItem {
+  /// The human readable name of the hierarchy item.
+  std::string name;
+
+  /// Optional detail for the hierarchy item. It can be, for instance, the
+  /// signature of a function or method.
+  llvm::Optional<std::string> detail;
+
+  /// The kind of the hierarchy item. For instance, class or interface.
+  SymbolKind kind;
+
+  /// `true` if the hierarchy item is deprecated. Otherwise, `false`.
+  bool deprecated;
+
+  /// The URI of the text document where this type hierarchy item belongs to.
+  URIForFile uri;
+
+  /// The range enclosing this type hierarchy item not including
+  /// leading/trailing whitespace but everything else like comments. This
+  /// information is typically used to determine if the client's cursor is
+  /// inside the type hierarch item to reveal in the symbol in the UI.
+  Range range;
+
+  /// The range that should be selected and revealed when this type hierarchy
+  /// item is being picked, e.g. the name of a function. Must be contained by
+  /// the `range`.
+  Range selectionRange;
+
+  /// If this type hierarchy item is resolved, it contains the direct parents.
+  /// Could be empty if the item does not have direct parents. If not defined,
+  /// the parents have not been resolved yet.
+  llvm::Optional<std::vector<TypeHierarchyItem>> parents;
+
+  /// If this type hierarchy item is resolved, it contains the direct children
+  /// of the current item. Could be empty if the item does not have any
+  /// descendants. If not defined, the children have not been resolved.
+  llvm::Optional<std::vector<TypeHierarchyItem>> children;
+
+  /// The protocol has a slot here for an optional 'data' filed, which can
+  /// be used to identify a type hierarchy item in a resolve request. We don't
+  /// need this (the item itself is sufficient to identify what to resolve)
+  /// so don't declare it.
+};
+llvm::json::Value toJSON(const TypeHierarchyItem &);
+llvm::raw_ostream &operator<<(llvm::raw_ostream &, const TypeHierarchyItem &);
+
 struct ReferenceParams : public TextDocumentPositionParams {
   // For now, no options like context.includeDeclaration are supported.
 };
 bool fromJSON(const llvm::json::Value &, ReferenceParams &);
+
+/// Clangd extension: indicates the current state of the file in clangd,
+/// sent from server via the `textDocument/clangd.fileStatus` notification.
+struct FileStatus {
+  /// The text document's URI.
+  URIForFile uri;
+  /// The human-readable string presents the current state of the file, can be
+  /// shown in the UI (e.g. status bar).
+  std::string state;
+  // FIXME: add detail messages.
+};
+llvm::json::Value toJSON(const FileStatus &FStatus);
 
 } // namespace clangd
 } // namespace clang

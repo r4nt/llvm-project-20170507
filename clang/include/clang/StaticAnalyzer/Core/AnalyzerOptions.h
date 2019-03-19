@@ -1,9 +1,8 @@
 //===- AnalyzerOptions.h - Analysis Engine Options --------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +19,7 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -137,6 +137,28 @@ enum UserModeKind {
   UMK_Deep = 2
 };
 
+/// Stores options for the analyzer from the command line.
+///
+/// Some options are frontend flags (e.g.: -analyzer-output), but some are
+/// analyzer configuration options, which are preceded by -analyzer-config
+/// (e.g.: -analyzer-config notes-as-events=true).
+///
+/// If you'd like to add a new frontend flag, add it to
+/// include/clang/Driver/CC1Options.td, add a new field to store the value of
+/// that flag in this class, and initialize it in
+/// lib/Frontend/CompilerInvocation.cpp.
+///
+/// If you'd like to add a new non-checker configuration, register it in
+/// include/clang/StaticAnalyzer/Core/AnalyzerOptions.def, and refer to the
+/// top of the file for documentation.
+///
+/// If you'd like to add a new checker option, call getChecker*Option()
+/// whenever.
+///
+/// Some of the options are controlled by raw frontend flags for no good reason,
+/// and should be eventually converted into -analyzer-config flags. New analyzer
+/// options should not be implemented as frontend flags. Frontend flags still
+/// make sense for things that do not affect the actual analysis.
 class AnalyzerOptions : public RefCountedBase<AnalyzerOptions> {
 public:
   using ConfigTable = llvm::StringMap<std::string>;
@@ -148,6 +170,7 @@ public:
   std::vector<std::pair<std::string, bool>> CheckersControlList;
 
   /// A key-value table of use-specified configuration values.
+  // TODO: This shouldn't be public.
   ConfigTable Config;
   AnalysisStores AnalysisStoreOpt = RegionStoreModel;
   AnalysisConstraints AnalysisConstraintsOpt = RangeConstraintsModel;
@@ -176,6 +199,7 @@ public:
   unsigned ShowCheckerHelp : 1;
   unsigned ShowEnabledCheckerList : 1;
   unsigned ShowConfigOptionsList : 1;
+  unsigned ShouldEmitErrorsOnInvalidConfigValue : 1;
   unsigned AnalyzeAll : 1;
   unsigned AnalyzerDisplayProgress : 1;
   unsigned AnalyzeNestedBlocks : 1;
@@ -198,155 +222,134 @@ public:
   /// The mode of function selection used during inlining.
   AnalysisInliningMode InliningMode = NoRedundancy;
 
-private:
-
-#define ANALYZER_OPTION(TYPE, NAME, CMDFLAG, DESC, DEFAULT_VAL)                \
-  Optional<TYPE> NAME;
+  // Create a field for each -analyzer-config option.
 #define ANALYZER_OPTION_DEPENDS_ON_USER_MODE(TYPE, NAME, CMDFLAG, DESC,        \
                                              SHALLOW_VAL, DEEP_VAL)            \
-  Optional<TYPE> NAME;
+  ANALYZER_OPTION(TYPE, NAME, CMDFLAG, DESC, SHALLOW_VAL)
+
+#define ANALYZER_OPTION(TYPE, NAME, CMDFLAG, DESC, DEFAULT_VAL)                \
+  TYPE NAME;
+
 #include "clang/StaticAnalyzer/Core/AnalyzerOptions.def"
 #undef ANALYZER_OPTION
 #undef ANALYZER_OPTION_DEPENDS_ON_USER_MODE
 
-  /// A helper function that retrieves option for a given full-qualified
-  /// checker name.
-  /// Options for checkers can be specified via 'analyzer-config' command-line
-  /// option.
-  /// Example:
-  /// @code-analyzer-config unix.Malloc:OptionName=CheckerOptionValue @endcode
-  /// or @code-analyzer-config unix:OptionName=GroupOptionValue @endcode
-  /// for groups of checkers.
-  /// @param [in] CheckerName  Full-qualified checker name, like
-  /// alpha.unix.StreamChecker.
-  /// @param [in] OptionName  Name of the option to get.
-  /// @param [in] Default  Default value if no option is specified.
-  /// @param [in] SearchInParents If set to true and the searched option was not
-  /// specified for the given checker the options for the parent packages will
-  /// be searched as well. The inner packages take precedence over the outer
-  /// ones.
-  /// @retval CheckerOptionValue  An option for a checker if it was specified.
-  /// @retval GroupOptionValue  An option for group if it was specified and no
-  /// checker-specific options were found. The closer group to checker,
-  /// the more priority it has. For example, @c coregroup.subgroup has more
-  /// priority than @c coregroup for @c coregroup.subgroup.CheckerName checker.
-  /// @retval Default  If nor checker option, nor group option was found.
-  StringRef getCheckerOption(StringRef CheckerName, StringRef OptionName,
-                             StringRef Default,
-                             bool SearchInParents = false);
+  // Create an array of all -analyzer-config command line options. Sort it in
+  // the constructor.
+  std::vector<StringRef> AnalyzerConfigCmdFlags = {
+#define ANALYZER_OPTION_DEPENDS_ON_USER_MODE(TYPE, NAME, CMDFLAG, DESC,        \
+                                             SHALLOW_VAL, DEEP_VAL)            \
+  ANALYZER_OPTION(TYPE, NAME, CMDFLAG, DESC, SHALLOW_VAL)
 
-public:
+#define ANALYZER_OPTION(TYPE, NAME, CMDFLAG, DESC, DEFAULT_VAL)                \
+    CMDFLAG,
+
+#include "clang/StaticAnalyzer/Core/AnalyzerOptions.def"
+#undef ANALYZER_OPTION
+#undef ANALYZER_OPTION_DEPENDS_ON_USER_MODE
+  };
+
+  bool isUnknownAnalyzerConfig(StringRef Name) const {
+
+    assert(std::is_sorted(AnalyzerConfigCmdFlags.begin(),
+                          AnalyzerConfigCmdFlags.end()));
+
+    return !std::binary_search(AnalyzerConfigCmdFlags.begin(),
+                               AnalyzerConfigCmdFlags.end(), Name);
+  }
+
   AnalyzerOptions()
       : DisableAllChecks(false), ShowCheckerHelp(false),
-        ShowEnabledCheckerList(false), AnalyzeAll(false),
-        AnalyzerDisplayProgress(false), AnalyzeNestedBlocks(false),
-        eagerlyAssumeBinOpBifurcation(false), TrimGraph(false),
-        visualizeExplodedGraphWithGraphViz(false),
-        UnoptimizedCFG(false),
-        PrintStats(false), NoRetryExhausted(false) {}
+        ShowEnabledCheckerList(false), ShowConfigOptionsList(false),
+        AnalyzeAll(false), AnalyzerDisplayProgress(false),
+        AnalyzeNestedBlocks(false), eagerlyAssumeBinOpBifurcation(false),
+        TrimGraph(false), visualizeExplodedGraphWithGraphViz(false),
+        UnoptimizedCFG(false), PrintStats(false), NoRetryExhausted(false) {
+    llvm::sort(AnalyzerConfigCmdFlags);
+  }
 
   /// Interprets an option's string value as a boolean. The "true" string is
   /// interpreted as true and the "false" string is interpreted as false.
   ///
   /// If an option value is not provided, returns the given \p DefaultVal.
-  /// @param [in] Name Name for option to retrieve.
+  /// @param [in] CheckerName The *full name* of the checker. One may retrieve
+  /// this from the checker object's field \c Name, or through \c
+  /// CheckerManager::getCurrentCheckName within the checker's registry
+  /// function.
+  /// Checker options are retrieved in the following format:
+  /// `-analyzer-config CheckerName:OptionName=Value.
+  /// @param [in] OptionName Name for option to retrieve.
   /// @param [in] DefaultVal Default value returned if no such option was
   /// specified.
-  /// @param [in] C The optional checker parameter that can be used to restrict
-  /// the search to the options of this particular checker (and its parents
-  /// depending on search mode).
   /// @param [in] SearchInParents If set to true and the searched option was not
   /// specified for the given checker the options for the parent packages will
   /// be searched as well. The inner packages take precedence over the outer
   /// ones.
-  bool getBooleanOption(StringRef Name, bool DefaultVal,
-                        const ento::CheckerBase *C = nullptr,
-                        bool SearchInParents = false);
+  bool getCheckerBooleanOption(StringRef CheckerName, StringRef OptionName,
+                               bool DefaultVal,
+                               bool SearchInParents = false) const;
 
-  /// Variant that accepts a Optional value to cache the result.
-  ///
-  /// @param [in,out] V Return value storage, returned if parameter contains
-  /// an existing valid option, else it is used to store a return value
-  /// @param [in] Name Name for option to retrieve.
-  /// @param [in] DefaultVal Default value returned if no such option was
-  /// specified.
-  /// @param [in] C The optional checker parameter that can be used to restrict
-  /// the search to the options of this particular checker (and its parents
-  /// depending on search mode).
-  /// @param [in] SearchInParents If set to true and the searched option was not
-  /// specified for the given checker the options for the parent packages will
-  /// be searched as well. The inner packages take precedence over the outer
-  /// ones.
-  bool getBooleanOption(Optional<bool> &V, StringRef Name, bool DefaultVal,
-                        const ento::CheckerBase *C  = nullptr,
-                        bool SearchInParents = false);
+  bool getCheckerBooleanOption(const ento::CheckerBase *C, StringRef OptionName,
+                               bool DefaultVal,
+                               bool SearchInParents = false) const;
 
   /// Interprets an option's string value as an integer value.
   ///
   /// If an option value is not provided, returns the given \p DefaultVal.
-  /// @param [in] Name Name for option to retrieve.
+  /// @param [in] CheckerName The *full name* of the checker. One may retrieve
+  /// this from the checker object's field \c Name, or through \c
+  /// CheckerManager::getCurrentCheckName within the checker's registry
+  /// function.
+  /// Checker options are retrieved in the following format:
+  /// `-analyzer-config CheckerName:OptionName=Value.
+  /// @param [in] OptionName Name for option to retrieve.
   /// @param [in] DefaultVal Default value returned if no such option was
   /// specified.
-  /// @param [in] C The optional checker parameter that can be used to restrict
-  /// the search to the options of this particular checker (and its parents
-  /// depending on search mode).
   /// @param [in] SearchInParents If set to true and the searched option was not
   /// specified for the given checker the options for the parent packages will
   /// be searched as well. The inner packages take precedence over the outer
   /// ones.
-  int getOptionAsInteger(StringRef Name, int DefaultVal,
-                         const ento::CheckerBase *C = nullptr,
-                         bool SearchInParents = false);
+  int getCheckerIntegerOption(StringRef CheckerName, StringRef OptionName,
+                              int DefaultVal,
+                              bool SearchInParents = false) const;
 
-  unsigned getOptionAsUInt(Optional<unsigned> &V, StringRef Name,
-                           unsigned DefaultVal,
-                           const ento::CheckerBase *C = nullptr,
-                           bool SearchInParents = false);
+  int getCheckerIntegerOption(const ento::CheckerBase *C, StringRef OptionName,
+                              int DefaultVal,
+                              bool SearchInParents = false) const;
 
   /// Query an option's string value.
   ///
   /// If an option value is not provided, returns the given \p DefaultVal.
-  /// @param [in] Name Name for option to retrieve.
+  /// @param [in] CheckerName The *full name* of the checker. One may retrieve
+  /// this from the checker object's field \c Name, or through \c
+  /// CheckerManager::getCurrentCheckName within the checker's registry
+  /// function.
+  /// Checker options are retrieved in the following format:
+  /// `-analyzer-config CheckerName:OptionName=Value.
+  /// @param [in] OptionName Name for option to retrieve.
   /// @param [in] DefaultVal Default value returned if no such option was
   /// specified.
-  /// @param [in] C The optional checker parameter that can be used to restrict
-  /// the search to the options of this particular checker (and its parents
-  /// depending on search mode).
   /// @param [in] SearchInParents If set to true and the searched option was not
   /// specified for the given checker the options for the parent packages will
   /// be searched as well. The inner packages take precedence over the outer
   /// ones.
-  StringRef getOptionAsString(StringRef Name, StringRef DefaultVal,
-                              const ento::CheckerBase *C = nullptr,
-                              bool SearchInParents = false);
+  StringRef getCheckerStringOption(StringRef CheckerName, StringRef OptionName,
+                                   StringRef DefaultVal,
+                                   bool SearchInParents = false) const;
 
-  StringRef getOptionAsString(Optional<StringRef> &V, StringRef Name,
-                              StringRef DefaultVal,
-                              const ento::CheckerBase *C = nullptr,
-                              bool SearchInParents = false);
-
-#define ANALYZER_OPTION_GEN_FN(TYPE, NAME, CMDFLAG, DESC, DEFAULT_VAL,  \
-                                CREATE_FN)                              \
-  TYPE CREATE_FN();
-
-#define ANALYZER_OPTION_GEN_FN_DEPENDS_ON_USER_MODE(                    \
-    TYPE, NAME, CMDFLAG, DESC, SHALLOW_VAL, DEEP_VAL, CREATE_FN)        \
-  TYPE CREATE_FN();
-
-#include "clang/StaticAnalyzer/Core/AnalyzerOptions.def"
-
-#undef ANALYZER_OPTION_GEN_FN_DEPENDS_ON_USER_MODE
-#undef ANALYZER_OPTION_WITH_FN
+  StringRef getCheckerStringOption(const ento::CheckerBase *C,
+                                   StringRef OptionName, StringRef DefaultVal,
+                                   bool SearchInParents = false) const;
 
   /// Retrieves and sets the UserMode. This is a high-level option,
   /// which is used to set other low-level options. It is not accessible
   /// outside of AnalyzerOptions.
-  UserModeKind getUserMode();
+  UserModeKind getUserMode() const;
 
-  ExplorationStrategyKind getExplorationStrategy();
+  ExplorationStrategyKind getExplorationStrategy() const;
 
   /// Returns the inter-procedural analysis mode.
-  IPAKind getIPAMode();
+  IPAKind getIPAMode() const;
 
   /// Returns the option controlling which C++ member functions will be
   /// considered for inlining.
@@ -354,12 +357,27 @@ public:
   /// This is controlled by the 'c++-inlining' config option.
   ///
   /// \sa CXXMemberInliningMode
-  bool mayInlineCXXMemberFunction(CXXInlineableMemberKind K);
-
-  StringRef getCTUDir();
+  bool mayInlineCXXMemberFunction(CXXInlineableMemberKind K) const;
 };
 
 using AnalyzerOptionsRef = IntrusiveRefCntPtr<AnalyzerOptions>;
+
+//===----------------------------------------------------------------------===//
+// We'll use AnalyzerOptions in the frontend, but we can't link the frontend
+// with clangStaticAnalyzerCore, because clangStaticAnalyzerCore depends on
+// clangFrontend.
+//
+// For this reason, implement some methods in this header file.
+//===----------------------------------------------------------------------===//
+
+inline UserModeKind AnalyzerOptions::getUserMode() const {
+  auto K = llvm::StringSwitch<llvm::Optional<UserModeKind>>(UserMode)
+    .Case("shallow", UMK_Shallow)
+    .Case("deep", UMK_Deep)
+    .Default(None);
+  assert(K.hasValue() && "User mode is invalid.");
+  return K.getValue();
+}
 
 } // namespace clang
 

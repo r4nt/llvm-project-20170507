@@ -1,19 +1,17 @@
 //===-- RegisterContextDarwin_x86_64.cpp ------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-// C Includes
-#include <inttypes.h> // PRIx64
+#include <inttypes.h>
 #include <stdarg.h>
-#include <stddef.h> // offsetof
+#include <stddef.h>
 
-// C++ Includes
-// Other libraries and framework includes
+#include <memory>
+
 #include "lldb/Utility/DataBufferHeap.h"
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/Endian.h"
@@ -29,7 +27,6 @@
 #define LLVM_EXTENSION
 #endif
 
-// Project includes
 #include "RegisterContextDarwin_x86_64.h"
 
 using namespace lldb;
@@ -914,7 +911,7 @@ bool RegisterContextDarwin_x86_64::WriteRegister(const RegisterInfo *reg_info,
 
 bool RegisterContextDarwin_x86_64::ReadAllRegisterValues(
     lldb::DataBufferSP &data_sp) {
-  data_sp.reset(new DataBufferHeap(REG_CONTEXT_SIZE, 0));
+  data_sp = std::make_shared<DataBufferHeap>(REG_CONTEXT_SIZE, 0);
   if (data_sp && ReadGPR(false) == 0 && ReadFPU(false) == 0 &&
       ReadEXC(false) == 0) {
     uint8_t *dst = data_sp->GetBytes();

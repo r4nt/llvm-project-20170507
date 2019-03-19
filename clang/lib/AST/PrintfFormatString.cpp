@@ -1,9 +1,8 @@
 //== PrintfFormatString.cpp - Analysis of printf format strings --*- C++ -*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -127,7 +126,9 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
 
     do {
       StringRef Str(I, E - I);
-      std::string Match = "^[\t\n\v\f\r ]*(private|public)[\t\n\v\f\r ]*(,|})";
+      std::string Match = "^[[:space:]]*"
+                          "(private|public|sensitive|mask\\.[^[:space:],}]*)"
+                          "[[:space:]]*(,|})";
       llvm::Regex R(Match);
       SmallVector<StringRef, 2> Matches;
 
@@ -138,7 +139,17 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
         // Set the privacy flag if the privacy annotation in the
         // comma-delimited segment is at least as strict as the privacy
         // annotations in previous comma-delimited segments.
-        if (MatchedStr.equals("private"))
+        if (MatchedStr.startswith("mask")) {
+          StringRef MaskType = MatchedStr.substr(sizeof("mask.") - 1);
+          unsigned Size = MaskType.size();
+          if (Warn && (Size == 0 || Size > 8))
+            H.handleInvalidMaskType(MaskType);
+          FS.setMaskType(MaskType);
+        } else if (MatchedStr.equals("sensitive"))
+          PrivacyFlags = clang::analyze_os_log::OSLogBufferItem::IsSensitive;
+        else if (PrivacyFlags !=
+                 clang::analyze_os_log::OSLogBufferItem::IsSensitive &&
+                 MatchedStr.equals("private"))
           PrivacyFlags = clang::analyze_os_log::OSLogBufferItem::IsPrivate;
         else if (PrivacyFlags == 0 && MatchedStr.equals("public"))
           PrivacyFlags = clang::analyze_os_log::OSLogBufferItem::IsPublic;
@@ -167,6 +178,9 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
       break;
     case clang::analyze_os_log::OSLogBufferItem::IsPublic:
       FS.setIsPublic(MatchedStr.data());
+      break;
+    case clang::analyze_os_log::OSLogBufferItem::IsSensitive:
+      FS.setIsSensitive(MatchedStr.data());
       break;
     default:
       llvm_unreachable("Unexpected privacy flag value");
@@ -231,6 +245,9 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
       return true;
     }
   }
+
+  if (ParseVectorModifier(H, FS, I, E, LO))
+    return true;
 
   // Look for the length modifier.
   if (ParseLengthModifier(FS, I, E, LO) && I == E) {
@@ -298,7 +315,11 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     case 'f': k = ConversionSpecifier::fArg; break;
     case 'g': k = ConversionSpecifier::gArg; break;
     case 'i': k = ConversionSpecifier::iArg; break;
-    case 'n': k = ConversionSpecifier::nArg; break;
+    case 'n':
+      // Not handled, but reserved in OpenCL.
+      if (!LO.OpenCL)
+        k = ConversionSpecifier::nArg;
+      break;
     case 'o': k = ConversionSpecifier::oArg; break;
     case 'p': k = ConversionSpecifier::pArg; break;
     case 's': k = ConversionSpecifier::sArg; break;
@@ -347,6 +368,7 @@ static PrintfSpecifierResult ParsePrintfSpecifier(FormatStringHandler &H,
     case 'Z':
       if (Target.getTriple().isOSMSVCRT())
         k = ConversionSpecifier::ZArg;
+      break;
   }
 
   // Check to see if we used the Objective-C modifier flags with
@@ -445,13 +467,8 @@ bool clang::analyze_format_string::ParseFormatStringHasSArg(const char *I,
 // Methods on PrintfSpecifier.
 //===----------------------------------------------------------------------===//
 
-ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
-                                    bool IsObjCLiteral) const {
-  const PrintfConversionSpecifier &CS = getConversionSpecifier();
-
-  if (!CS.consumesDataArgument())
-    return ArgType::Invalid();
-
+ArgType PrintfSpecifier::getScalarArgType(ASTContext &Ctx,
+                                          bool IsObjCLiteral) const {
   if (CS.getKind() == ConversionSpecifier::cArg)
     switch (LM.getKind()) {
       case LengthModifier::None:
@@ -473,10 +490,12 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
         // GNU extension.
         return Ctx.LongLongTy;
       case LengthModifier::None:
+      case LengthModifier::AsShortLong:
         return Ctx.IntTy;
       case LengthModifier::AsInt32:
         return ArgType(Ctx.IntTy, "__int32");
-      case LengthModifier::AsChar: return ArgType::AnyCharTy;
+      case LengthModifier::AsChar:
+        return ArgType::AnyCharTy;
       case LengthModifier::AsShort: return Ctx.ShortTy;
       case LengthModifier::AsLong: return Ctx.LongTy;
       case LengthModifier::AsLongLong:
@@ -507,6 +526,7 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
         // GNU extension.
         return Ctx.UnsignedLongLongTy;
       case LengthModifier::None:
+      case LengthModifier::AsShortLong:
         return Ctx.UnsignedIntTy;
       case LengthModifier::AsInt32:
         return ArgType(Ctx.UnsignedIntTy, "unsigned __int32");
@@ -536,6 +556,18 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
     }
 
   if (CS.isDoubleArg()) {
+    if (!VectorNumElts.isInvalid()) {
+      switch (LM.getKind()) {
+      case LengthModifier::AsShort:
+        return Ctx.HalfTy;
+      case LengthModifier::AsShortLong:
+        return Ctx.FloatTy;
+      case LengthModifier::AsLong:
+      default:
+        return Ctx.DoubleTy;
+      }
+    }
+
     if (LM.getKind() == LengthModifier::AsLongDouble)
       return Ctx.LongDoubleTy;
     return Ctx.DoubleTy;
@@ -569,6 +601,8 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
       case LengthModifier::AsInt64:
       case LengthModifier::AsWide:
         return ArgType::Invalid();
+      case LengthModifier::AsShortLong:
+        llvm_unreachable("only used for OpenCL which doesn not handle nArg");
     }
   }
 
@@ -609,6 +643,21 @@ ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
 
   // FIXME: Handle other cases.
   return ArgType();
+}
+
+
+ArgType PrintfSpecifier::getArgType(ASTContext &Ctx,
+                                    bool IsObjCLiteral) const {
+  const PrintfConversionSpecifier &CS = getConversionSpecifier();
+
+  if (!CS.consumesDataArgument())
+    return ArgType::Invalid();
+
+  ArgType ScalarTy = getScalarArgType(Ctx, IsObjCLiteral);
+  if (!ScalarTy.isValid() || VectorNumElts.isInvalid())
+    return ScalarTy;
+
+  return ScalarTy.makeVectorType(Ctx, VectorNumElts.getConstantAmount());
 }
 
 bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
@@ -660,8 +709,17 @@ bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
   if (const EnumType *ETy = QT->getAs<EnumType>())
     QT = ETy->getDecl()->getIntegerType();
 
-  // We can only work with builtin types.
   const BuiltinType *BT = QT->getAs<BuiltinType>();
+  if (!BT) {
+    const VectorType *VT = QT->getAs<VectorType>();
+    if (VT) {
+      QT = VT->getElementType();
+      BT = QT->getAs<BuiltinType>();
+      VectorNumElts = OptionalAmount(VT->getNumElements());
+    }
+  }
+
+  // We can only work with builtin types.
   if (!BT)
     return false;
 
@@ -708,6 +766,9 @@ bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
   case BuiltinType::Id:
 #include "clang/Basic/OpenCLImageTypes.def"
+#define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
+  case BuiltinType::Id:
+#include "clang/Basic/OpenCLExtensionTypes.def"
 #define SIGNED_TYPE(Id, SingletonId)
 #define UNSIGNED_TYPE(Id, SingletonId)
 #define FLOATING_TYPE(Id, SingletonId)
@@ -720,10 +781,13 @@ bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
   case BuiltinType::UInt:
   case BuiltinType::Int:
   case BuiltinType::Float:
-  case BuiltinType::Double:
-    LM.setKind(LengthModifier::None);
+    LM.setKind(VectorNumElts.isInvalid() ?
+               LengthModifier::None : LengthModifier::AsShortLong);
     break;
-
+  case BuiltinType::Double:
+    LM.setKind(VectorNumElts.isInvalid() ?
+               LengthModifier::None : LengthModifier::AsLong);
+    break;
   case BuiltinType::Char_U:
   case BuiltinType::UChar:
   case BuiltinType::Char_S:
@@ -756,7 +820,7 @@ bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
     namedTypeToLengthModifier(QT, LM);
 
   // If fixing the length modifier was enough, we might be done.
-  if (hasValidLengthModifier(Ctx.getTargetInfo())) {
+  if (hasValidLengthModifier(Ctx.getTargetInfo(), LangOpt)) {
     // If we're going to offer a fix anyway, make sure the sign matches.
     switch (CS.getKind()) {
     case ConversionSpecifier::uArg:
@@ -830,6 +894,11 @@ void PrintfSpecifier::toString(raw_ostream &os) const {
   FieldWidth.toString(os);
   // Precision
   Precision.toString(os);
+
+  // Vector modifier
+  if (!VectorNumElts.isInvalid())
+    os << 'v' << VectorNumElts.getConstantAmount();
+
   // Length modifier
   os << LM.toString();
   // Conversion specifier

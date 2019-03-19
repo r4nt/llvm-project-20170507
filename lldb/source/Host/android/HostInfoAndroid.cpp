@@ -1,9 +1,8 @@
 //===-- HostInfoAndroid.cpp -------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -40,8 +39,11 @@ FileSpec HostInfoAndroid::ResolveLibraryPath(const std::string &module_path,
   static const char *const default_lib64_path[] = {"/vendor/lib64",
                                                    "/system/lib64", nullptr};
 
-  if (module_path.empty() || module_path[0] == '/')
-    return FileSpec(module_path.c_str(), true);
+  if (module_path.empty() || module_path[0] == '/') {
+    FileSpec file_spec(module_path.c_str());
+    FileSystem::Instance().Resolve(file_spec);
+    return file_spec;
+  }
 
   SmallVector<StringRef, 4> ld_paths;
 

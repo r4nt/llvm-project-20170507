@@ -1,12 +1,13 @@
 //===- unittest/Support/YAMLIOTest.cpp ------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/BitmaskEnum.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
@@ -579,6 +580,90 @@ TEST(YAMLIO, TestReadWriteEndianTypes) {
   }
 }
 
+enum class Enum : uint16_t { One, Two };
+enum class BitsetEnum : uint16_t {
+  ZeroOne = 0x01,
+  OneZero = 0x10,
+  LLVM_MARK_AS_BITMASK_ENUM(/*LargestValue*/ OneZero),
+};
+LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
+struct EndianEnums {
+  llvm::support::little_t<Enum> LittleEnum;
+  llvm::support::big_t<Enum> BigEnum;
+  llvm::support::little_t<BitsetEnum> LittleBitset;
+  llvm::support::big_t<BitsetEnum> BigBitset;
+};
+namespace llvm {
+namespace yaml {
+template <> struct ScalarEnumerationTraits<Enum> {
+  static void enumeration(IO &io, Enum &E) {
+    io.enumCase(E, "One", Enum::One);
+    io.enumCase(E, "Two", Enum::Two);
+  }
+};
+
+template <> struct ScalarBitSetTraits<BitsetEnum> {
+  static void bitset(IO &io, BitsetEnum &E) {
+    io.bitSetCase(E, "ZeroOne", BitsetEnum::ZeroOne);
+    io.bitSetCase(E, "OneZero", BitsetEnum::OneZero);
+  }
+};
+
+template <> struct MappingTraits<EndianEnums> {
+  static void mapping(IO &io, EndianEnums &EE) {
+    io.mapRequired("LittleEnum", EE.LittleEnum);
+    io.mapRequired("BigEnum", EE.BigEnum);
+    io.mapRequired("LittleBitset", EE.LittleBitset);
+    io.mapRequired("BigBitset", EE.BigBitset);
+  }
+};
+} // namespace yaml
+} // namespace llvm
+
+TEST(YAMLIO, TestReadEndianEnums) {
+  EndianEnums map;
+  Input yin("---\n"
+            "LittleEnum:   One\n"
+            "BigEnum:      Two\n"
+            "LittleBitset: [ ZeroOne ]\n"
+            "BigBitset:    [ ZeroOne, OneZero ]\n"
+            "...\n");
+  yin >> map;
+
+  EXPECT_FALSE(yin.error());
+  EXPECT_EQ(Enum::One, map.LittleEnum);
+  EXPECT_EQ(Enum::Two, map.BigEnum);
+  EXPECT_EQ(BitsetEnum::ZeroOne, map.LittleBitset);
+  EXPECT_EQ(BitsetEnum::ZeroOne | BitsetEnum::OneZero, map.BigBitset);
+}
+
+TEST(YAMLIO, TestReadWriteEndianEnums) {
+  std::string intermediate;
+  {
+    EndianEnums map;
+    map.LittleEnum = Enum::Two;
+    map.BigEnum = Enum::One;
+    map.LittleBitset = BitsetEnum::OneZero | BitsetEnum::ZeroOne;
+    map.BigBitset = BitsetEnum::OneZero;
+
+    llvm::raw_string_ostream ostr(intermediate);
+    Output yout(ostr);
+    yout << map;
+  }
+
+  {
+    Input yin(intermediate);
+    EndianEnums map;
+    yin >> map;
+
+    EXPECT_FALSE(yin.error());
+    EXPECT_EQ(Enum::Two, map.LittleEnum);
+    EXPECT_EQ(Enum::One, map.BigEnum);
+    EXPECT_EQ(BitsetEnum::OneZero | BitsetEnum::ZeroOne, map.LittleBitset);
+    EXPECT_EQ(BitsetEnum::OneZero, map.BigBitset);
+  }
+}
+
 struct StringTypes {
   llvm::StringRef str1;
   llvm::StringRef str2;
@@ -823,7 +908,7 @@ namespace yaml {
       io.mapRequired("f1", c.f1);
       io.mapRequired("f2", c.f2);
       io.mapRequired("f3", c.f3);
-      io.mapOptional("f4", c.f4, MyFlags(flagRound));
+      io.mapOptional("f4", c.f4, flagRound);
      }
   };
 }
@@ -1327,8 +1412,8 @@ namespace yaml {
     static void mapping(IO &io, TotalSeconds &secs) {
       MappingNormalization<NormalizedSeconds, TotalSeconds> keys(io, secs);
 
-      io.mapOptional("hours",    keys->hours,    (uint32_t)0);
-      io.mapOptional("minutes",  keys->minutes,  (uint8_t)0);
+      io.mapOptional("hours", keys->hours, 0);
+      io.mapOptional("minutes", keys->minutes, 0);
       io.mapRequired("seconds",  keys->seconds);
     }
   };
@@ -2641,4 +2726,236 @@ TEST(YAMLIO, Numeric) {
   EXPECT_FALSE(isNumeric("+12,345"));
   EXPECT_FALSE(isNumeric("-inf"));
   EXPECT_FALSE(isNumeric("1,230.15"));
+}
+
+//===----------------------------------------------------------------------===//
+//  Test PolymorphicTraits and TaggedScalarTraits
+//===----------------------------------------------------------------------===//
+
+struct Poly {
+  enum NodeKind {
+    NK_Scalar,
+    NK_Seq,
+    NK_Map,
+  } Kind;
+
+  Poly(NodeKind Kind) : Kind(Kind) {}
+
+  virtual ~Poly() = default;
+
+  NodeKind getKind() const { return Kind; }
+};
+
+struct Scalar : Poly {
+  enum ScalarKind {
+    SK_Unknown,
+    SK_Double,
+    SK_Bool,
+  } SKind;
+
+  union {
+    double DoubleValue;
+    bool BoolValue;
+  };
+
+  Scalar() : Poly(NK_Scalar), SKind(SK_Unknown) {}
+  Scalar(double DoubleValue)
+      : Poly(NK_Scalar), SKind(SK_Double), DoubleValue(DoubleValue) {}
+  Scalar(bool BoolValue)
+      : Poly(NK_Scalar), SKind(SK_Bool), BoolValue(BoolValue) {}
+
+  static bool classof(const Poly *N) { return N->getKind() == NK_Scalar; }
+};
+
+struct Seq : Poly, std::vector<std::unique_ptr<Poly>> {
+  Seq() : Poly(NK_Seq) {}
+
+  static bool classof(const Poly *N) { return N->getKind() == NK_Seq; }
+};
+
+struct Map : Poly, llvm::StringMap<std::unique_ptr<Poly>> {
+  Map() : Poly(NK_Map) {}
+
+  static bool classof(const Poly *N) { return N->getKind() == NK_Map; }
+};
+
+namespace llvm {
+namespace yaml {
+
+template <> struct PolymorphicTraits<std::unique_ptr<Poly>> {
+  static NodeKind getKind(const std::unique_ptr<Poly> &N) {
+    if (isa<Scalar>(*N))
+      return NodeKind::Scalar;
+    if (isa<Seq>(*N))
+      return NodeKind::Sequence;
+    if (isa<Map>(*N))
+      return NodeKind::Map;
+    llvm_unreachable("unsupported node type");
+  }
+
+  static Scalar &getAsScalar(std::unique_ptr<Poly> &N) {
+    if (!N || !isa<Scalar>(*N))
+      N = llvm::make_unique<Scalar>();
+    return *cast<Scalar>(N.get());
+  }
+
+  static Seq &getAsSequence(std::unique_ptr<Poly> &N) {
+    if (!N || !isa<Seq>(*N))
+      N = llvm::make_unique<Seq>();
+    return *cast<Seq>(N.get());
+  }
+
+  static Map &getAsMap(std::unique_ptr<Poly> &N) {
+    if (!N || !isa<Map>(*N))
+      N = llvm::make_unique<Map>();
+    return *cast<Map>(N.get());
+  }
+};
+
+template <> struct TaggedScalarTraits<Scalar> {
+  static void output(const Scalar &S, void *Ctxt, raw_ostream &ScalarOS,
+                     raw_ostream &TagOS) {
+    switch (S.SKind) {
+    case Scalar::SK_Unknown:
+      report_fatal_error("output unknown scalar");
+      break;
+    case Scalar::SK_Double:
+      TagOS << "!double";
+      ScalarTraits<double>::output(S.DoubleValue, Ctxt, ScalarOS);
+      break;
+    case Scalar::SK_Bool:
+      TagOS << "!bool";
+      ScalarTraits<bool>::output(S.BoolValue, Ctxt, ScalarOS);
+      break;
+    }
+  }
+
+  static StringRef input(StringRef ScalarStr, StringRef Tag, void *Ctxt,
+                         Scalar &S) {
+    S.SKind = StringSwitch<Scalar::ScalarKind>(Tag)
+                  .Case("!double", Scalar::SK_Double)
+                  .Case("!bool", Scalar::SK_Bool)
+                  .Default(Scalar::SK_Unknown);
+    switch (S.SKind) {
+    case Scalar::SK_Unknown:
+      return StringRef("unknown scalar tag");
+    case Scalar::SK_Double:
+      return ScalarTraits<double>::input(ScalarStr, Ctxt, S.DoubleValue);
+    case Scalar::SK_Bool:
+      return ScalarTraits<bool>::input(ScalarStr, Ctxt, S.BoolValue);
+    }
+    llvm_unreachable("unknown scalar kind");
+  }
+
+  static QuotingType mustQuote(const Scalar &S, StringRef Str) {
+    switch (S.SKind) {
+    case Scalar::SK_Unknown:
+      report_fatal_error("quote unknown scalar");
+    case Scalar::SK_Double:
+      return ScalarTraits<double>::mustQuote(Str);
+    case Scalar::SK_Bool:
+      return ScalarTraits<bool>::mustQuote(Str);
+    }
+    llvm_unreachable("unknown scalar kind");
+  }
+};
+
+template <> struct CustomMappingTraits<Map> {
+  static void inputOne(IO &IO, StringRef Key, Map &M) {
+    IO.mapRequired(Key.str().c_str(), M[Key]);
+  }
+
+  static void output(IO &IO, Map &M) {
+    for (auto &N : M)
+      IO.mapRequired(N.getKey().str().c_str(), N.getValue());
+  }
+};
+
+template <> struct SequenceTraits<Seq> {
+  static size_t size(IO &IO, Seq &A) { return A.size(); }
+
+  static std::unique_ptr<Poly> &element(IO &IO, Seq &A, size_t Index) {
+    if (Index >= A.size())
+      A.resize(Index + 1);
+    return A[Index];
+  }
+};
+
+} // namespace yaml
+} // namespace llvm
+
+TEST(YAMLIO, TestReadWritePolymorphicScalar) {
+  std::string intermediate;
+  std::unique_ptr<Poly> node = llvm::make_unique<Scalar>(true);
+
+  llvm::raw_string_ostream ostr(intermediate);
+  Output yout(ostr);
+#ifdef GTEST_HAS_DEATH_TEST
+#ifndef NDEBUG
+  EXPECT_DEATH(yout << node, "plain scalar documents are not supported");
+#endif
+#endif
+}
+
+TEST(YAMLIO, TestReadWritePolymorphicSeq) {
+  std::string intermediate;
+  {
+    auto seq = llvm::make_unique<Seq>();
+    seq->push_back(llvm::make_unique<Scalar>(true));
+    seq->push_back(llvm::make_unique<Scalar>(1.0));
+    auto node = llvm::unique_dyn_cast<Poly>(seq);
+
+    llvm::raw_string_ostream ostr(intermediate);
+    Output yout(ostr);
+    yout << node;
+  }
+  {
+    Input yin(intermediate);
+    std::unique_ptr<Poly> node;
+    yin >> node;
+
+    EXPECT_FALSE(yin.error());
+    auto seq = llvm::dyn_cast<Seq>(node.get());
+    ASSERT_TRUE(seq);
+    ASSERT_EQ(seq->size(), 2u);
+    auto first = llvm::dyn_cast<Scalar>((*seq)[0].get());
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->SKind, Scalar::SK_Bool);
+    EXPECT_TRUE(first->BoolValue);
+    auto second = llvm::dyn_cast<Scalar>((*seq)[1].get());
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->SKind, Scalar::SK_Double);
+    EXPECT_EQ(second->DoubleValue, 1.0);
+  }
+}
+
+TEST(YAMLIO, TestReadWritePolymorphicMap) {
+  std::string intermediate;
+  {
+    auto map = llvm::make_unique<Map>();
+    (*map)["foo"] = llvm::make_unique<Scalar>(false);
+    (*map)["bar"] = llvm::make_unique<Scalar>(2.0);
+    std::unique_ptr<Poly> node = llvm::unique_dyn_cast<Poly>(map);
+
+    llvm::raw_string_ostream ostr(intermediate);
+    Output yout(ostr);
+    yout << node;
+  }
+  {
+    Input yin(intermediate);
+    std::unique_ptr<Poly> node;
+    yin >> node;
+
+    EXPECT_FALSE(yin.error());
+    auto map = llvm::dyn_cast<Map>(node.get());
+    ASSERT_TRUE(map);
+    auto foo = llvm::dyn_cast<Scalar>((*map)["foo"].get());
+    ASSERT_TRUE(foo);
+    EXPECT_EQ(foo->SKind, Scalar::SK_Bool);
+    EXPECT_FALSE(foo->BoolValue);
+    auto bar = llvm::dyn_cast<Scalar>((*map)["bar"].get());
+    ASSERT_TRUE(bar);
+    EXPECT_EQ(bar->SKind, Scalar::SK_Double);
+    EXPECT_EQ(bar->DoubleValue, 2.0);
+  }
 }

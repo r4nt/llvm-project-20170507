@@ -1,9 +1,8 @@
 //===- MCExpr.cpp - Assembly Level Expression Implementation --------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -303,8 +302,6 @@ StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
   case VK_Hexagon_LD_PLT: return "LDPLT";
   case VK_Hexagon_IE: return "IE";
   case VK_Hexagon_IE_GOT: return "IEGOT";
-  case VK_WebAssembly_FUNCTION: return "FUNCTION";
-  case VK_WebAssembly_GLOBAL: return "GLOBAL";
   case VK_WebAssembly_TYPEINDEX: return "TYPEINDEX";
   case VK_AMDGPU_GOTPCREL32_LO: return "gotpcrel32@lo";
   case VK_AMDGPU_GOTPCREL32_HI: return "gotpcrel32@hi";
@@ -418,8 +415,6 @@ MCSymbolRefExpr::getVariantKindForName(StringRef Name) {
     .Case("lo8", VK_AVR_LO8)
     .Case("hi8", VK_AVR_HI8)
     .Case("hlo8", VK_AVR_HLO8)
-    .Case("function", VK_WebAssembly_FUNCTION)
-    .Case("global", VK_WebAssembly_GLOBAL)
     .Case("typeindex", VK_WebAssembly_TYPEINDEX)
     .Case("gotpcrel32@lo", VK_AMDGPU_GOTPCREL32_LO)
     .Case("gotpcrel32@hi", VK_AMDGPU_GOTPCREL32_HI)
@@ -555,6 +550,11 @@ static void AttemptToFoldSymbolOffsetDifference(
   // Pointers to Thumb symbols need to have their low-bit set to allow
   // for interworking.
   if (Asm->isThumbFunc(&SA))
+    Addend |= 1;
+
+  // If symbol is labeled as micromips, we set low-bit to ensure
+  // correct offset in .gcc_except_table
+  if (Asm->getBackend().isMicroMips(&SA))
     Addend |= 1;
 
   // Clear the symbol expr pointers to indicate we have folded these

@@ -17,7 +17,7 @@ multiclass B<string name, string help1, string help2> {
   def no_ # NAME: Flag<["--", "-"], "no-" # name>, HelpText<help2>;
 }
 
-// The follow flags are shared with the ELF linker
+// The following flags are shared with the ELF linker
 def color_diagnostics: F<"color-diagnostics">,
   HelpText<"Use colors in diagnostics">;
 
@@ -75,17 +75,27 @@ def o: JoinedOrSeparate<["-"], "o">, MetaVarName<"<path>">,
 
 def O: JoinedOrSeparate<["-"], "O">, HelpText<"Optimize output file size">;
 
+defm pie: B<"pie",
+    "Create a position independent executable",
+    "Do not create a position independent executable (default)">;
+
 defm print_gc_sections: B<"print-gc-sections",
     "List removed unused sections",
     "Do not list removed unused sections">;
 
 def relocatable: F<"relocatable">, HelpText<"Create relocatable object file">;
 
+def shared: F<"shared">, HelpText<"Build a shared object">;
+
 def strip_all: F<"strip-all">, HelpText<"Strip all symbols">;
 
 def strip_debug: F<"strip-debug">, HelpText<"Strip debugging information">;
 
 def threads: F<"threads">, HelpText<"Run the linker multi-threaded">;
+
+def trace: F<"trace">, HelpText<"Print the names of the input files">;
+
+defm trace_symbol: Eq<"trace-symbol", "Trace references to symbols">;
 
 defm undefined: Eq<"undefined", "Force undefined symbol during linking">;
 
@@ -123,6 +133,9 @@ def global_base: J<"global-base=">,
 def import_memory: F<"import-memory">,
   HelpText<"Import memory from the environment">;
 
+def shared_memory: F<"shared-memory">,
+  HelpText<"Use shared linear memory">;
+
 def import_table: F<"import-table">,
   HelpText<"Import function table from the environment">;
 
@@ -151,6 +164,8 @@ def: Flag<["-"], "m">, Alias<max_memory>;
 def: Flag<["-"], "r">, Alias<relocatable>;
 def: Flag<["-"], "s">, Alias<strip_all>, HelpText<"Alias for --strip-all">;
 def: Flag<["-"], "S">, Alias<strip_debug>, HelpText<"Alias for --strip-debug">;
+def: Flag<["-"], "t">, Alias<trace>, HelpText<"Alias for --trace">;
+def: JoinedOrSeparate<["-"], "y">, Alias<trace_symbol>, HelpText<"Alias for --trace-symbol">;
 def: JoinedOrSeparate<["-"], "u">, Alias<undefined>;
 
 // LTO-related options.

@@ -2,10 +2,9 @@
 //-*-===//
 
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,7 +17,6 @@
 #include "lldb/Symbol/ClangASTContext.h"
 #include "lldb/Symbol/ClangUtil.h"
 #include "lldb/Symbol/Declaration.h"
-#include "lldb/Symbol/GoASTContext.h"
 
 using namespace clang;
 using namespace lldb;
@@ -191,12 +189,20 @@ void VerifyEncodingAndBitSize(clang::ASTContext *context,
     return;
 
   EXPECT_TRUE(type_ptr->isBuiltinType());
-  if (encoding == eEncodingSint)
+  switch (encoding) {
+  case eEncodingSint:
     EXPECT_TRUE(type_ptr->isSignedIntegerType());
-  else if (encoding == eEncodingUint)
+    break;
+  case eEncodingUint:
     EXPECT_TRUE(type_ptr->isUnsignedIntegerType());
-  else if (encoding == eEncodingIEEE754)
+    break;
+  case eEncodingIEEE754:
     EXPECT_TRUE(type_ptr->isFloatingType());
+    break;
+  default:
+    FAIL() << "Unexpected encoding";
+    break;
+  }
 }
 
 TEST_F(TestClangASTContext, TestBuiltinTypeForEncodingAndBitSize) {
@@ -239,11 +245,6 @@ TEST_F(TestClangASTContext, TestIsClangType) {
 
   // Default constructed type should fail
   EXPECT_FALSE(ClangUtil::IsClangType(CompilerType()));
-
-  // Go type should fail
-  GoASTContext go_ast;
-  CompilerType go_type(&go_ast, bool_ctype);
-  EXPECT_FALSE(ClangUtil::IsClangType(go_type));
 }
 
 TEST_F(TestClangASTContext, TestRemoveFastQualifiers) {

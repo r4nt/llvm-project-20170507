@@ -1,9 +1,8 @@
 //===-- Disassembler.h ------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -12,32 +11,32 @@
 
 #include "lldb/Core/Address.h"
 #include "lldb/Core/EmulateInstruction.h"
-#include "lldb/Core/FormatEntity.h" // for FormatEntity
+#include "lldb/Core/FormatEntity.h"
 #include "lldb/Core/Opcode.h"
 #include "lldb/Core/PluginInterface.h"
 #include "lldb/Interpreter/OptionValue.h"
 #include "lldb/Symbol/LineEntry.h"
-#include "lldb/Target/ExecutionContext.h" // for ExecutionContext
+#include "lldb/Target/ExecutionContext.h"
 #include "lldb/Utility/ArchSpec.h"
-#include "lldb/Utility/ConstString.h" // for ConstString
+#include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/FileSpec.h"
-#include "lldb/lldb-defines.h"      // for DISALLOW_COPY_AND_ASSIGN
-#include "lldb/lldb-forward.h"      // for InstructionSP, DisassemblerSP
-#include "lldb/lldb-private-enumerations.h" // for AddressClass
-#include "lldb/lldb-types.h"        // for addr_t, offset_t
+#include "lldb/lldb-defines.h"
+#include "lldb/lldb-forward.h"
+#include "lldb/lldb-private-enumerations.h"
+#include "lldb/lldb-types.h"
 
-#include "llvm/ADT/StringRef.h" // for StringRef
+#include "llvm/ADT/StringRef.h"
 
-#include <functional> // for function
+#include <functional>
 #include <map>
-#include <memory> // for enable_shared_from_this
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <stddef.h> // for size_t
-#include <stdint.h> // for uint32_t, int64_t
-#include <stdio.h>  // for FILE
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 
 namespace lldb_private {
 class AddressRange;
@@ -116,32 +115,32 @@ public:
   /// Print the (optional) address, (optional) bytes, opcode,
   /// operands, and instruction comments to a stream.
   ///
-  /// @param[in] s
+  /// \param[in] s
   ///     The Stream to add the text to.
   ///
-  /// @param[in] show_address
+  /// \param[in] show_address
   ///     Whether the address (using disassembly_addr_format_spec formatting)
   ///     should be printed.
   ///
-  /// @param[in] show_bytes
+  /// \param[in] show_bytes
   ///     Whether the bytes of the assembly instruction should be printed.
   ///
-  /// @param[in] max_opcode_byte_size
+  /// \param[in] max_opcode_byte_size
   ///     The size (in bytes) of the largest instruction in the list that
   ///     we are printing (for text justification/alignment purposes)
   ///     Only needed if show_bytes is true.
   ///
-  /// @param[in] exe_ctx
+  /// \param[in] exe_ctx
   ///     The current execution context, if available.  May be used in
   ///     the assembling of the operands+comments for this instruction.
   ///     Pass NULL if not applicable.
   ///
-  /// @param[in] sym_ctx
+  /// \param[in] sym_ctx
   ///     The SymbolContext for this instruction.
   ///     Pass NULL if not available/computed.
   ///     Only needed if show_address is true.
   ///
-  /// @param[in] prev_sym_ctx
+  /// \param[in] prev_sym_ctx
   ///     The SymbolContext for the previous instruction.  Depending on
   ///     the disassembly address format specification, a change in
   ///     Symbol / Function may mean that a line is printed with the new
@@ -150,11 +149,11 @@ public:
   ///     the InstructionList.
   ///     Only needed if show_address is true.
   ///
-  /// @param[in] disassembly_addr_format
+  /// \param[in] disassembly_addr_format
   ///     The format specification for how addresses are printed.
   ///     Only needed if show_address is true.
   ///
-  /// @param[in] max_address_text_size
+  /// \param[in] max_address_text_size
   ///     The length of the longest address string at the start of the
   ///     disassembly line that will be printed (the
   ///     Debugger::FormatDisassemblerAddress() string)
@@ -414,7 +413,7 @@ public:
   static bool
   Disassemble(Debugger &debugger, const ArchSpec &arch, const char *plugin_name,
               const char *flavor, const ExecutionContext &exe_ctx,
-              const ConstString &name, Module *module,
+              ConstString name, Module *module,
               uint32_t num_instructions, bool mixed_source_and_assembly,
               uint32_t num_mixed_context_lines, uint32_t options, Stream &strm);
 

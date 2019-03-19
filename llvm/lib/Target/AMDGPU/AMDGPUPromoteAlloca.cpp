@@ -1,9 +1,8 @@
 //===-- AMDGPUPromoteAlloca.cpp - Promote Allocas -------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -68,6 +67,11 @@ namespace {
 static cl::opt<bool> DisablePromoteAllocaToVector(
   "disable-promote-alloca-to-vector",
   cl::desc("Disable promote alloca to vector"),
+  cl::init(false));
+
+static cl::opt<bool> DisablePromoteAllocaToLDS(
+  "disable-promote-alloca-to-lds",
+  cl::desc("Disable promote alloca to LDS"),
   cl::init(false));
 
 // FIXME: This can create globals so should be a module pass.
@@ -240,11 +244,11 @@ AMDGPUPromoteAlloca::getLocalSizeYZ(IRBuilder<> &Builder) {
   // We could do a single 64-bit load here, but it's likely that the basic
   // 32-bit and extract sequence is already present, and it is probably easier
   // to CSE this. The loads should be mergable later anyway.
-  Value *GEPXY = Builder.CreateConstInBoundsGEP1_64(CastDispatchPtr, 1);
-  LoadInst *LoadXY = Builder.CreateAlignedLoad(GEPXY, 4);
+  Value *GEPXY = Builder.CreateConstInBoundsGEP1_64(I32Ty, CastDispatchPtr, 1);
+  LoadInst *LoadXY = Builder.CreateAlignedLoad(I32Ty, GEPXY, 4);
 
-  Value *GEPZU = Builder.CreateConstInBoundsGEP1_64(CastDispatchPtr, 2);
-  LoadInst *LoadZU = Builder.CreateAlignedLoad(GEPZU, 4);
+  Value *GEPZU = Builder.CreateConstInBoundsGEP1_64(I32Ty, CastDispatchPtr, 2);
+  LoadInst *LoadZU = Builder.CreateAlignedLoad(I32Ty, GEPZU, 4);
 
   MDNode *MD = MDNode::get(Mod->getContext(), None);
   LoadXY->setMetadata(LLVMContext::MD_invariant_load, MD);
@@ -323,6 +327,10 @@ static bool canVectorizeInst(Instruction *Inst, User *User) {
     // Currently only handle the case where the Pointer Operand is a GEP.
     // Also we could not vectorize volatile or atomic loads.
     LoadInst *LI = cast<LoadInst>(Inst);
+    if (isa<AllocaInst>(User) &&
+        LI->getPointerOperandType() == User->getType() &&
+        isa<VectorType>(LI->getType()))
+      return true;
     return isa<GetElementPtrInst>(LI->getPointerOperand()) && LI->isSimple();
   }
   case Instruction::BitCast:
@@ -332,6 +340,10 @@ static bool canVectorizeInst(Instruction *Inst, User *User) {
     // since it should be canonical form, the User should be a GEP.
     // Also we could not vectorize volatile or atomic stores.
     StoreInst *SI = cast<StoreInst>(Inst);
+    if (isa<AllocaInst>(User) &&
+        SI->getPointerOperandType() == User->getType() &&
+        isa<VectorType>(SI->getValueOperand()->getType()))
+      return true;
     return (SI->getPointerOperand() == User) && isa<GetElementPtrInst>(User) && SI->isSimple();
   }
   default:
@@ -346,7 +358,8 @@ static bool tryPromoteAllocaToVector(AllocaInst *Alloca) {
     return false;
   }
 
-  ArrayType *AllocaTy = dyn_cast<ArrayType>(Alloca->getAllocatedType());
+  Type *AT = Alloca->getAllocatedType();
+  SequentialType *AllocaTy = dyn_cast<SequentialType>(AT);
 
   LLVM_DEBUG(dbgs() << "Alloca candidate for vectorization\n");
 
@@ -393,7 +406,9 @@ static bool tryPromoteAllocaToVector(AllocaInst *Alloca) {
     }
   }
 
-  VectorType *VectorTy = arrayTypeToVecType(AllocaTy);
+  VectorType *VectorTy = dyn_cast<VectorType>(AllocaTy);
+  if (!VectorTy)
+    VectorTy = arrayTypeToVecType(cast<ArrayType>(AllocaTy));
 
   LLVM_DEBUG(dbgs() << "  Converting alloca to vector " << *AllocaTy << " -> "
                     << *VectorTy << '\n');
@@ -403,25 +418,30 @@ static bool tryPromoteAllocaToVector(AllocaInst *Alloca) {
     IRBuilder<> Builder(Inst);
     switch (Inst->getOpcode()) {
     case Instruction::Load: {
+      if (Inst->getType() == AT)
+        break;
+
       Type *VecPtrTy = VectorTy->getPointerTo(AMDGPUAS::PRIVATE_ADDRESS);
       Value *Ptr = cast<LoadInst>(Inst)->getPointerOperand();
       Value *Index = calculateVectorIndex(Ptr, GEPVectorIdx);
 
       Value *BitCast = Builder.CreateBitCast(Alloca, VecPtrTy);
-      Value *VecValue = Builder.CreateLoad(BitCast);
+      Value *VecValue = Builder.CreateLoad(VectorTy, BitCast);
       Value *ExtractElement = Builder.CreateExtractElement(VecValue, Index);
       Inst->replaceAllUsesWith(ExtractElement);
       Inst->eraseFromParent();
       break;
     }
     case Instruction::Store: {
-      Type *VecPtrTy = VectorTy->getPointerTo(AMDGPUAS::PRIVATE_ADDRESS);
-
       StoreInst *SI = cast<StoreInst>(Inst);
+      if (SI->getValueOperand()->getType() == AT)
+        break;
+
+      Type *VecPtrTy = VectorTy->getPointerTo(AMDGPUAS::PRIVATE_ADDRESS);
       Value *Ptr = SI->getPointerOperand();
       Value *Index = calculateVectorIndex(Ptr, GEPVectorIdx);
       Value *BitCast = Builder.CreateBitCast(Alloca, VecPtrTy);
-      Value *VecValue = Builder.CreateLoad(BitCast);
+      Value *VecValue = Builder.CreateLoad(VectorTy, BitCast);
       Value *NewVecValue = Builder.CreateInsertElement(VecValue,
                                                        SI->getValueOperand(),
                                                        Index);
@@ -706,6 +726,9 @@ bool AMDGPUPromoteAlloca::handleAlloca(AllocaInst &I, bool SufficientLDS) {
   if (tryPromoteAllocaToVector(&I))
     return true; // Promoted to vector.
 
+  if (DisablePromoteAllocaToLDS)
+    return false;
+
   const Function &ContainingFunction = *I.getParent()->getParent();
   CallingConv::ID CC = ContainingFunction.getCallingConv();
 
@@ -895,7 +918,8 @@ bool AMDGPUPromoteAlloca::handleAlloca(AllocaInst &I, bool SufficientLDS) {
       );
 
       CallInst *NewCall = Builder.CreateCall(
-          ObjectSize, {Src, Intr->getOperand(1), Intr->getOperand(2)});
+          ObjectSize,
+          {Src, Intr->getOperand(1), Intr->getOperand(2), Intr->getOperand(3)});
       Intr->replaceAllUsesWith(NewCall);
       Intr->eraseFromParent();
       continue;

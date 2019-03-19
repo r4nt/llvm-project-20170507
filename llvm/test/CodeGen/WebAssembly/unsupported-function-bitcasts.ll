@@ -10,11 +10,11 @@ declare i32 @has_i64_arg(i64)
 declare i32 @has_ptr_arg(i8*)
 
 ; CHECK-LABEL: test_invalid_rtn:
-; CHECK-NEXT: i32.const   $push[[L0:[0-9]+]]=, 0{{$}}
-; CHECK-NEXT: i32.call $push[[L1:[0-9]+]]=, .Lhas_i64_arg_bitcast_invalid.2@FUNCTION, $pop[[L0]]{{$}}
+; CHECK:      i32.const   $push[[L0:[0-9]+]]=, 0{{$}}
+; CHECK-NEXT: i32.call $push[[L1:[0-9]+]]=, .Lhas_i64_arg_bitcast_invalid.2, $pop[[L0]]{{$}}
 ; CHECK-NEXT: drop $pop[[L1]]{{$}}
 ; CHECK-NEXT: i64.const   $push[[L0:[0-9]+]]=, 0{{$}}
-; CHECK-NEXT: i64.call $push[[L1:[0-9]+]]=, .Lhas_i64_arg_bitcast_invalid@FUNCTION, $pop[[L0]]{{$}}
+; CHECK-NEXT: i64.call $push[[L1:[0-9]+]]=, .Lhas_i64_arg_bitcast_invalid, $pop[[L0]]{{$}}
 ; CHECK-NEXT: drop $pop[[L1]]{{$}}
 ; CHECK-NEXT: end_function
 define void @test_invalid_rtn() {
@@ -25,21 +25,21 @@ entry:
 }
 
 ; CHECK-LABEL: test_struct_rtn:
-; CHECK: 	call    	has_i64_arg@FUNCTION, $pop6, $pop0
+; CHECK: 	call    	has_i64_arg, $pop6, $pop0
 define void @test_struct_rtn() {
   call {i32, i32} bitcast (i32 (i64)* @has_i64_arg to {i32, i32} (i64)*)(i64 0)
   ret void
 }
 
 ; CHECK-LABEL: test_invalid_arg:
-; CHECK-NEXT: 	i32.const	$push[[L0:[0-9]+]]=, 2{{$}}
-; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, .Lhas_ptr_arg_bitcast_invalid.4@FUNCTION, $pop[[L0]]{{$}}
+; CHECK:      	i32.const	$push[[L0:[0-9]+]]=, 2{{$}}
+; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, .Lhas_ptr_arg_bitcast_invalid.4, $pop[[L0]]{{$}}
 ; CHECK-NEXT: 	drop	$pop[[L1]]{{$}}
 ; CHECK-NEXT: 	i32.const	$push[[L0:[0-9]+]]=, 2{{$}}
-; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, has_ptr_arg@FUNCTION, $pop[[L0]]{{$}}
+; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, has_ptr_arg, $pop[[L0]]{{$}}
 ; CHECK-NEXT: 	drop	$pop[[L1]]{{$}}
 ; CHECK-NEXT: 	i64.const	$push[[L0:[0-9]+]]=, 3{{$}}
-; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, .Lhas_ptr_arg_bitcast_invalid@FUNCTION, $pop[[L0]]{{$}}
+; CHECK-NEXT: 	i32.call	$push[[L1:[0-9]+]]=, .Lhas_ptr_arg_bitcast_invalid, $pop[[L0]]{{$}}
 ; CHECK-NEXT: 	drop	$pop[[L1]]{{$}}
 ; CHECK-NEXT: 	end_function
 define void @test_invalid_arg() {
@@ -51,25 +51,21 @@ entry:
 }
 
 ; CHECK-LABEL: .Lhas_i64_arg_bitcast_invalid:
-; CHECK-NEXT:  .param  	i64
-; CHECK-NEXT:  .result 	i64
+; CHECK-NEXT:  .functype .Lhas_i64_arg_bitcast_invalid (i64) -> (i64)
 ; CHECK-NEXT:  unreachable
 ; CHECK-NEXT:  end_function
 
 ; CHECK-LABEL: .Lhas_i64_arg_bitcast_invalid.2:
-; CHECK-NEXT:  .param  	i32
-; CHECK-NEXT:  .result 	i32
+; CHECK-NEXT:  .functype .Lhas_i64_arg_bitcast_invalid.2 (i32) -> (i32)
 ; CHECK-NEXT:  unreachable
 ; CHECK-NEXT:  end_function
 
 ; CHECK-LABEL: .Lhas_ptr_arg_bitcast_invalid:
-; CHECK-NEXT: 	.param  	i64
-; CHECK-NEXT: 	.result 	i32
+; CHECK-NEXT: 	.functype .Lhas_ptr_arg_bitcast_invalid (i64) -> (i32)
 ; CHECK-NEXT: 	unreachable
 ; CHECK-NEXT: 	end_function
 
 ; CHECK-LABEL: .Lhas_ptr_arg_bitcast_invalid.4:
-; CHECK-NEXT: 	.param  	i32
-; CHECK-NEXT: 	.result 	i32
+; CHECK-NEXT: 	.functype .Lhas_ptr_arg_bitcast_invalid.4 (i32) -> (i32)
 ; CHECK-NEXT: 	unreachable
 ; CHECK-NEXT: 	end_function

@@ -1,9 +1,8 @@
 //===- HexagonInstrInfo.cpp - Hexagon Instruction Information -------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -1293,7 +1292,6 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
         auto T = BuildMI(MBB, MI, DL, get(Hexagon::V6_vccombine))
                      .add(Op0)
                      .addReg(PReg, S)
-                     .add(Op1)
                      .addReg(SrcHi)
                      .addReg(SrcLo);
         if (IsDestLive)
@@ -1311,6 +1309,38 @@ bool HexagonInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
         if (IsDestLive)
           T.addReg(Op0.getReg(), RegState::Implicit);
       }
+      MBB.erase(MI);
+      return true;
+    }
+
+    case Hexagon::PS_crash: {
+      // Generate a misaligned load that is guaranteed to cause a crash.
+      class CrashPseudoSourceValue : public PseudoSourceValue {
+      public:
+        CrashPseudoSourceValue(const TargetInstrInfo &TII)
+          : PseudoSourceValue(TargetCustom, TII) {}
+
+        bool isConstant(const MachineFrameInfo *) const override {
+          return false;
+        }
+        bool isAliased(const MachineFrameInfo *) const override {
+          return false;
+        }
+        bool mayAlias(const MachineFrameInfo *) const override {
+          return false;
+        }
+        void printCustom(raw_ostream &OS) const override {
+          OS << "MisalignedCrash";
+        }
+      };
+
+      static const CrashPseudoSourceValue CrashPSV(*this);
+      MachineMemOperand *MMO = MF.getMachineMemOperand(
+          MachinePointerInfo(&CrashPSV),
+          MachineMemOperand::MOLoad | MachineMemOperand::MOVolatile, 8, 1);
+      BuildMI(MBB, MI, DL, get(Hexagon::PS_loadrdabs), Hexagon::D13)
+        .addImm(0xBADC0FEE)  // Misaligned load.
+        .addMemOperand(MMO);
       MBB.erase(MI);
       return true;
     }
@@ -2426,7 +2456,7 @@ bool HexagonInstrInfo::isPredicated(unsigned Opcode) const {
 
 bool HexagonInstrInfo::isPredicateLate(unsigned Opcode) const {
   const uint64_t F = get(Opcode).TSFlags;
-  return ~(F >> HexagonII::PredicateLatePos) & HexagonII::PredicateLateMask;
+  return (F >> HexagonII::PredicateLatePos) & HexagonII::PredicateLateMask;
 }
 
 bool HexagonInstrInfo::isPredictedTaken(unsigned Opcode) const {
@@ -2894,14 +2924,15 @@ bool HexagonInstrInfo::addLatencyToSchedule(const MachineInstr &MI1,
 }
 
 /// Get the base register and byte offset of a load/store instr.
-bool HexagonInstrInfo::getMemOpBaseRegImmOfs(MachineInstr &LdSt,
-      unsigned &BaseReg, int64_t &Offset, const TargetRegisterInfo *TRI)
-      const {
+bool HexagonInstrInfo::getMemOperandWithOffset(
+    MachineInstr &LdSt, MachineOperand *&BaseOp, int64_t &Offset,
+    const TargetRegisterInfo *TRI) const {
   unsigned AccessSize = 0;
-  int OffsetVal = 0;
-  BaseReg = getBaseAndOffset(LdSt, OffsetVal, AccessSize);
-  Offset = OffsetVal;
-  return BaseReg != 0;
+  BaseOp = getBaseAndOffset(LdSt, Offset, AccessSize);
+  assert((!BaseOp || BaseOp->isReg()) &&
+         "getMemOperandWithOffset only supports base "
+         "operands of type register.");
+  return BaseOp != nullptr;
 }
 
 /// Can these instructions execute at the same time in a bundle.
@@ -3108,21 +3139,22 @@ unsigned HexagonInstrInfo::getAddrMode(const MachineInstr &MI) const {
 
 // Returns the base register in a memory access (load/store). The offset is
 // returned in Offset and the access size is returned in AccessSize.
-// If the base register has a subregister or the offset field does not contain
-// an immediate value, return 0.
-unsigned HexagonInstrInfo::getBaseAndOffset(const MachineInstr &MI,
-      int &Offset, unsigned &AccessSize) const {
+// If the base operand has a subregister or the offset field does not contain
+// an immediate value, return nullptr.
+MachineOperand *HexagonInstrInfo::getBaseAndOffset(const MachineInstr &MI,
+                                                   int64_t &Offset,
+                                                   unsigned &AccessSize) const {
   // Return if it is not a base+offset type instruction or a MemOp.
   if (getAddrMode(MI) != HexagonII::BaseImmOffset &&
       getAddrMode(MI) != HexagonII::BaseLongOffset &&
       !isMemOp(MI) && !isPostIncrement(MI))
-    return 0;
+    return nullptr;
 
   AccessSize = getMemAccessSize(MI);
 
   unsigned BasePos = 0, OffsetPos = 0;
   if (!getBaseAndOffsetPosition(MI, BasePos, OffsetPos))
-    return 0;
+    return nullptr;
 
   // Post increment updates its EA after the mem access,
   // so we need to treat its offset as zero.
@@ -3131,14 +3163,14 @@ unsigned HexagonInstrInfo::getBaseAndOffset(const MachineInstr &MI,
   } else {
     const MachineOperand &OffsetOp = MI.getOperand(OffsetPos);
     if (!OffsetOp.isImm())
-      return 0;
+      return nullptr;
     Offset = OffsetOp.getImm();
   }
 
   const MachineOperand &BaseOp = MI.getOperand(BasePos);
   if (BaseOp.getSubReg() != 0)
-    return 0;
-  return BaseOp.getReg();
+    return nullptr;
+  return &const_cast<MachineOperand&>(BaseOp);
 }
 
 /// Return the position of the base and offset operands for this instruction.

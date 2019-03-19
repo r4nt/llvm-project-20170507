@@ -1,9 +1,8 @@
 //===-- CompileUnitIndex.cpp ------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -108,26 +107,19 @@ static void ParseExtendedInfo(PdbIndex &index, CompilandIndexItem &item) {
 }
 
 CompilandIndexItem::CompilandIndexItem(
-    PdbSymUid uid, llvm::pdb::ModuleDebugStreamRef debug_stream,
+    PdbCompilandId id, llvm::pdb::ModuleDebugStreamRef debug_stream,
     llvm::pdb::DbiModuleDescriptor descriptor)
-    : m_uid(uid), m_debug_stream(std::move(debug_stream)),
+    : m_id(id), m_debug_stream(std::move(debug_stream)),
       m_module_descriptor(std::move(descriptor)) {}
 
 CompilandIndexItem &CompileUnitIndex::GetOrCreateCompiland(uint16_t modi) {
-  PdbSymUid uid = PdbSymUid::makeCompilandId(modi);
-  return GetOrCreateCompiland(uid);
-}
-
-CompilandIndexItem &
-CompileUnitIndex::GetOrCreateCompiland(PdbSymUid compiland_uid) {
-  auto result = m_comp_units.try_emplace(compiland_uid.toOpaqueId(), nullptr);
+  auto result = m_comp_units.try_emplace(modi, nullptr);
   if (!result.second)
     return *result.first->second;
 
   // Find the module list and load its debug information stream and cache it
   // since we need to use it for almost all interesting operations.
   const DbiModuleList &modules = m_index.dbi().modules();
-  uint16_t modi = compiland_uid.asCompiland().modi;
   llvm::pdb::DbiModuleDescriptor descriptor = modules.getModuleDescriptor(modi);
   uint16_t stream = descriptor.getModuleStreamIndex();
   std::unique_ptr<llvm::msf::MappedBlockStream> stream_data =
@@ -139,7 +131,7 @@ CompileUnitIndex::GetOrCreateCompiland(PdbSymUid compiland_uid) {
   std::unique_ptr<CompilandIndexItem> &cci = result.first->second;
 
   cci = llvm::make_unique<CompilandIndexItem>(
-      compiland_uid, std::move(debug_stream), std::move(descriptor));
+      PdbCompilandId{modi}, std::move(debug_stream), std::move(descriptor));
   ParseExtendedInfo(m_index, *cci);
 
   cci->m_strings.initialize(debug_stream.getSubsectionsArray());
@@ -172,23 +164,14 @@ CompileUnitIndex::GetOrCreateCompiland(PdbSymUid compiland_uid) {
 }
 
 const CompilandIndexItem *CompileUnitIndex::GetCompiland(uint16_t modi) const {
-  return GetCompiland(PdbSymUid::makeCompilandId(modi));
-}
-
-const CompilandIndexItem *
-CompileUnitIndex::GetCompiland(PdbSymUid compiland_uid) const {
-  auto iter = m_comp_units.find(compiland_uid.toOpaqueId());
+  auto iter = m_comp_units.find(modi);
   if (iter == m_comp_units.end())
     return nullptr;
   return iter->second.get();
 }
 
 CompilandIndexItem *CompileUnitIndex::GetCompiland(uint16_t modi) {
-  return GetCompiland(PdbSymUid::makeCompilandId(modi));
-}
-
-CompilandIndexItem *CompileUnitIndex::GetCompiland(PdbSymUid compiland_uid) {
-  auto iter = m_comp_units.find(compiland_uid.toOpaqueId());
+  auto iter = m_comp_units.find(modi);
   if (iter == m_comp_units.end())
     return nullptr;
   return iter->second.get();
@@ -220,6 +203,12 @@ CompileUnitIndex::GetMainSourceFile(const CompilandIndexItem &item) const {
       TypeDeserializer::deserializeAs<StringIdRecord>(dir_cvt, working_dir));
   llvm::cantFail(
       TypeDeserializer::deserializeAs<StringIdRecord>(file_cvt, file_name));
+
+  llvm::sys::path::Style style = working_dir.String.startswith("/")
+                                     ? llvm::sys::path::Style::posix
+                                     : llvm::sys::path::Style::windows;
+  if (llvm::sys::path::is_absolute(file_name.String, style))
+    return file_name.String;
 
   llvm::SmallString<64> absolute_path = working_dir.String;
   llvm::sys::path::append(absolute_path, file_name.String);

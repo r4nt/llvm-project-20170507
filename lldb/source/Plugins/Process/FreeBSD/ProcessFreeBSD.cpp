@@ -1,14 +1,12 @@
 //===-- ProcessFreeBSD.cpp ----------------------------------------*- C++
 //-*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-// C Includes
 #include <errno.h>
 #include <pthread.h>
 #include <pthread_np.h>
@@ -18,11 +16,9 @@
 #include <sys/user.h>
 #include <machine/elf.h>
 
-// C++ Includes
 #include <mutex>
 #include <unordered_map>
 
-// Other libraries and framework includes
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Host/FileSystem.h"
 #include "lldb/Host/Host.h"
@@ -39,7 +35,6 @@
 #include "ProcessFreeBSD.h"
 #include "ProcessMonitor.h"
 
-// Other libraries and framework includes
 #include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Breakpoint/Watchpoint.h"
 #include "lldb/Core/Module.h"
@@ -374,12 +369,13 @@ Status ProcessFreeBSD::DoLaunch(Module *module,
   assert(m_monitor == NULL);
 
   FileSpec working_dir = launch_info.GetWorkingDirectory();
-  namespace fs = llvm::sys::fs;
-  if (working_dir && (!working_dir.ResolvePath() ||
-                      !fs::is_directory(working_dir.GetPath()))) {
-    error.SetErrorStringWithFormat("No such file or directory: %s",
+  if (working_dir) {
+    FileSystem::Instance().Resolve(working_dir);
+    if (!FileSystem::Instance().IsDirectory(working_dir.GetPath())) {
+      error.SetErrorStringWithFormat("No such file or directory: %s",
                                    working_dir.GetCString());
-    return error;
+      return error;
+    }
   }
 
   SetPrivateState(eStateLaunching);
@@ -1039,11 +1035,11 @@ bool ProcessFreeBSD::SupportHardwareSingleStepping() const {
 }
 
 Status ProcessFreeBSD::SetupSoftwareSingleStepping(lldb::tid_t tid) {
-  std::unique_ptr<EmulateInstruction> emulator_ap(
+  std::unique_ptr<EmulateInstruction> emulator_up(
       EmulateInstruction::FindPlugin(GetTarget().GetArchitecture(),
                                      eInstructionTypePCModifying, nullptr));
 
-  if (emulator_ap == nullptr)
+  if (emulator_up == nullptr)
     return Status("Instruction emulator not found!");
 
   FreeBSDThread *thread = static_cast<FreeBSDThread *>(
@@ -1054,17 +1050,17 @@ Status ProcessFreeBSD::SetupSoftwareSingleStepping(lldb::tid_t tid) {
   lldb::RegisterContextSP register_context_sp = thread->GetRegisterContext();
 
   EmulatorBaton baton(this, register_context_sp.get());
-  emulator_ap->SetBaton(&baton);
-  emulator_ap->SetReadMemCallback(&ReadMemoryCallback);
-  emulator_ap->SetReadRegCallback(&ReadRegisterCallback);
-  emulator_ap->SetWriteMemCallback(&WriteMemoryCallback);
-  emulator_ap->SetWriteRegCallback(&WriteRegisterCallback);
+  emulator_up->SetBaton(&baton);
+  emulator_up->SetReadMemCallback(&ReadMemoryCallback);
+  emulator_up->SetReadRegCallback(&ReadRegisterCallback);
+  emulator_up->SetWriteMemCallback(&WriteMemoryCallback);
+  emulator_up->SetWriteRegCallback(&WriteRegisterCallback);
 
-  if (!emulator_ap->ReadInstruction())
+  if (!emulator_up->ReadInstruction())
     return Status("Read instruction failed!");
 
   bool emulation_result =
-      emulator_ap->EvaluateInstruction(eEmulateInstructionOptionAutoAdvancePC);
+      emulator_up->EvaluateInstruction(eEmulateInstructionOptionAutoAdvancePC);
   const RegisterInfo *reg_info_pc = register_context_sp->GetRegisterInfo(
       eRegisterKindGeneric, LLDB_REGNUM_GENERIC_PC);
   auto pc_it =
@@ -1081,7 +1077,7 @@ Status ProcessFreeBSD::SetupSoftwareSingleStepping(lldb::tid_t tid) {
     // PC modifying instruction should be successful. The failure most
     // likely caused by a not supported instruction which don't modify PC.
     next_pc =
-        register_context_sp->GetPC() + emulator_ap->GetOpcode().GetByteSize();
+        register_context_sp->GetPC() + emulator_up->GetOpcode().GetByteSize();
   } else {
     // The instruction emulation failed after it modified the PC. It is an
     // unknown error where we can't continue because the next instruction is

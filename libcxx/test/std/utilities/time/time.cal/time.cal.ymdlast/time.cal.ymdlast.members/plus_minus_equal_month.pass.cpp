@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -33,11 +32,10 @@ constexpr bool testConstexpr(D d1)
     return true;
 }
 
-int main()
+int main(int, char**)
 {
     using year                = std::chrono::year;
     using month               = std::chrono::month;
-    using day                 = std::chrono::day;
     using month_day_last      = std::chrono::month_day_last;
     using year_month_day_last = std::chrono::year_month_day_last;
     using months              = std::chrono::months;
@@ -47,7 +45,7 @@ int main()
 
     ASSERT_SAME_TYPE(year_month_day_last&, decltype(std::declval<year_month_day_last&>() += std::declval<months>()));
     ASSERT_SAME_TYPE(year_month_day_last&, decltype(std::declval<year_month_day_last&>() -= std::declval<months>()));
-    
+
     static_assert(testConstexpr<year_month_day_last, months>(year_month_day_last{year{1234}, month_day_last{month{1}}}), "");
 
     for (unsigned i = 0; i <= 10; ++i)
@@ -64,4 +62,6 @@ int main()
         assert(static_cast<unsigned>((ym             ).month()) == i + 1);
         assert(ym.year() == y);
     }
+
+  return 0;
 }

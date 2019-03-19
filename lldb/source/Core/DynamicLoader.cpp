@@ -1,31 +1,30 @@
 //===-- DynamicLoader.cpp ---------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "lldb/Target/DynamicLoader.h"
 
 #include "lldb/Core/Module.h"
-#include "lldb/Core/ModuleList.h" // for ModuleList
+#include "lldb/Core/ModuleList.h"
 #include "lldb/Core/ModuleSpec.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/Section.h"
-#include "lldb/Symbol/ObjectFile.h" // for ObjectFile
+#include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Target/MemoryRegionInfo.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/Target.h"
-#include "lldb/Utility/ConstString.h"     // for ConstString
-#include "lldb/lldb-private-interfaces.h" // for DynamicLoaderCreateInstance
+#include "lldb/Utility/ConstString.h"
+#include "lldb/lldb-private-interfaces.h"
 
-#include "llvm/ADT/StringRef.h" // for StringRef
+#include "llvm/ADT/StringRef.h"
 
-#include <memory> // for shared_ptr, unique_ptr
+#include <memory>
 
-#include <assert.h> // for assert
+#include <assert.h>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -39,10 +38,10 @@ DynamicLoader *DynamicLoader::FindPlugin(Process *process,
         PluginManager::GetDynamicLoaderCreateCallbackForPluginName(
             const_plugin_name);
     if (create_callback) {
-      std::unique_ptr<DynamicLoader> instance_ap(
+      std::unique_ptr<DynamicLoader> instance_up(
           create_callback(process, true));
-      if (instance_ap)
-        return instance_ap.release();
+      if (instance_up)
+        return instance_up.release();
     }
   } else {
     for (uint32_t idx = 0;
@@ -50,10 +49,10 @@ DynamicLoader *DynamicLoader::FindPlugin(Process *process,
               PluginManager::GetDynamicLoaderCreateCallbackAtIndex(idx)) !=
          nullptr;
          ++idx) {
-      std::unique_ptr<DynamicLoader> instance_ap(
+      std::unique_ptr<DynamicLoader> instance_up(
           create_callback(process, false));
-      if (instance_ap)
-        return instance_ap.release();
+      if (instance_up)
+        return instance_up.release();
     }
   }
   return nullptr;

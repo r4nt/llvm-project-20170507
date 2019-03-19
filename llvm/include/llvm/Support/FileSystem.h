@@ -1,9 +1,8 @@
 //===- llvm/Support/FileSystem.h - File System OS Concept -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -160,6 +159,8 @@ protected:
   #if defined(LLVM_ON_UNIX)
   time_t fs_st_atime = 0;
   time_t fs_st_mtime = 0;
+  uint32_t fs_st_atime_nsec = 0;
+  uint32_t fs_st_mtime_nsec = 0;
   uid_t fs_st_uid = 0;
   gid_t fs_st_gid = 0;
   off_t fs_st_size = 0;
@@ -180,9 +181,12 @@ public:
   explicit basic_file_status(file_type Type) : Type(Type) {}
 
   #if defined(LLVM_ON_UNIX)
-  basic_file_status(file_type Type, perms Perms, time_t ATime, time_t MTime,
+  basic_file_status(file_type Type, perms Perms, time_t ATime,
+                    uint32_t ATimeNSec, time_t MTime, uint32_t MTimeNSec,
                     uid_t UID, gid_t GID, off_t Size)
-      : fs_st_atime(ATime), fs_st_mtime(MTime), fs_st_uid(UID), fs_st_gid(GID),
+      : fs_st_atime(ATime), fs_st_mtime(MTime),
+        fs_st_atime_nsec(ATimeNSec), fs_st_mtime_nsec(MTimeNSec),
+        fs_st_uid(UID), fs_st_gid(GID),
         fs_st_size(Size), Type(Type), Perms(Perms) {}
 #elif defined(_WIN32)
   basic_file_status(file_type Type, perms Perms, uint32_t LastAccessTimeHigh,
@@ -199,7 +203,20 @@ public:
   // getters
   file_type type() const { return Type; }
   perms permissions() const { return Perms; }
+
+  /// The file access time as reported from the underlying file system.
+  ///
+  /// Also see comments on \c getLastModificationTime() related to the precision
+  /// of the returned value.
   TimePoint<> getLastAccessedTime() const;
+
+  /// The file modification time as reported from the underlying file system.
+  ///
+  /// The returned value allows for nanosecond precision but the actual
+  /// resolution is an implementation detail of the underlying file system.
+  /// There is no guarantee for what kind of resolution you can expect, the
+  /// resolution can differ across platforms and even across mountpoints on the
+  /// same machine.
   TimePoint<> getLastModificationTime() const;
 
   #if defined(LLVM_ON_UNIX)
@@ -247,8 +264,11 @@ public:
 
   #if defined(LLVM_ON_UNIX)
   file_status(file_type Type, perms Perms, dev_t Dev, nlink_t Links, ino_t Ino,
-              time_t ATime, time_t MTime, uid_t UID, gid_t GID, off_t Size)
-      : basic_file_status(Type, Perms, ATime, MTime, UID, GID, Size),
+              time_t ATime, uint32_t ATimeNSec,
+              time_t MTime, uint32_t MTimeNSec,
+              uid_t UID, gid_t GID, off_t Size)
+      : basic_file_status(Type, Perms, ATime, ATimeNSec, MTime, MTimeNSec,
+                          UID, GID, Size),
         fs_st_dev(Dev), fs_st_nlinks(Links), fs_st_ino(Ino) {}
   #elif defined(_WIN32)
   file_status(file_type Type, perms Perms, uint32_t LinkCount,
@@ -281,10 +301,7 @@ public:
 /// relative/../path => <current-directory>/relative/../path
 ///
 /// @param path A path that is modified to be an absolute path.
-/// @returns errc::success if \a path has been made absolute, otherwise a
-///          platform-specific error_code.
-std::error_code make_absolute(const Twine &current_directory,
-                              SmallVectorImpl<char> &path);
+void make_absolute(const Twine &current_directory, SmallVectorImpl<char> &path);
 
 /// Make \a path an absolute path.
 ///
@@ -348,6 +365,12 @@ std::error_code create_hard_link(const Twine &to, const Twine &from);
 ///                     directory.
 std::error_code real_path(const Twine &path, SmallVectorImpl<char> &output,
                           bool expand_tilde = false);
+
+/// Expands ~ expressions to the user's home directory. On Unix ~user
+/// directories are resolved as well.
+///
+/// @param path The path to resolve.
+void expand_tilde(const Twine &path, SmallVectorImpl<char> &output);
 
 /// Get the current path.
 ///
@@ -741,11 +764,32 @@ enum OpenFlags : unsigned {
   OF_UpdateAtime = 16,
 };
 
+/// Create a potentially unique file name but does not create it.
+///
+/// Generates a unique path suitable for a temporary file but does not
+/// open or create the file. The name is based on \a Model with '%'
+/// replaced by a random char in [0-9a-f]. If \a MakeAbsolute is true
+/// then the system's temp directory is prepended first. If \a MakeAbsolute
+/// is false the current directory will be used instead.
+///
+/// This function does not check if the file exists. If you want to be sure
+/// that the file does not yet exist, you should use use enough '%' characters
+/// in your model to ensure this. Each '%' gives 4-bits of entropy so you can
+/// use 32 of them to get 128 bits of entropy.
+///
+/// Example: clang-%%-%%-%%-%%-%%.s => clang-a0-b1-c2-d3-e4.s
+///
+/// @param Model Name to base unique path off of.
+/// @param ResultPath Set to the file's path.
+/// @param MakeAbsolute Whether to use the system temp directory.
+void createUniquePath(const Twine &Model, SmallVectorImpl<char> &ResultPath,
+                      bool MakeAbsolute);
+
 /// Create a uniquely named file.
 ///
 /// Generates a unique path suitable for a temporary file and then opens it as a
-/// file. The name is based on \a model with '%' replaced by a random char in
-/// [0-9a-f]. If \a model is not an absolute path, the temporary file will be
+/// file. The name is based on \a Model with '%' replaced by a random char in
+/// [0-9a-f]. If \a Model is not an absolute path, the temporary file will be
 /// created in the current directory.
 ///
 /// Example: clang-%%-%%-%%-%%-%%.s => clang-a0-b1-c2-d3-e4.s

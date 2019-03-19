@@ -1,21 +1,16 @@
 //===-- UnwindLLDB.h --------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef lldb_UnwindLLDB_h_
 #define lldb_UnwindLLDB_h_
 
-// C Includes
-// C++ Includes
 #include <vector>
 
-// Other libraries and framework includes
-// Project includes
 #include "lldb/Symbol/FuncUnwinders.h"
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Symbol/UnwindPlan.h"
@@ -106,7 +101,7 @@ protected:
   /// into an array of ConstStrings before it can be used - we only want
   /// to do that once per thread so it's here in the UnwindLLDB object.
   ///
-  /// @return
+  /// \return
   ///     Vector of ConstStrings of trap handler function names.  May be
   ///     empty.
   //------------------------------------------------------------------

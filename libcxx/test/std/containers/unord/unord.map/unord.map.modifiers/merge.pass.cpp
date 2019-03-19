@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,6 +22,7 @@
 //   void merge(unordered_multimap<key_type, value_type, H2, P2, allocator_type>&& source);
 
 #include <unordered_map>
+#include <cassert>
 #include "test_macros.h"
 #include "Counter.h"
 
@@ -40,9 +40,6 @@ struct throw_hasher
 
     throw_hasher(bool& should_throw) : should_throw_(should_throw) {}
 
-    typedef size_t result_type;
-    typedef T argument_type;
-
     size_t operator()(const T& p) const
     {
         if (should_throw_)
@@ -52,7 +49,7 @@ struct throw_hasher
 };
 #endif
 
-int main()
+int main(int, char**)
 {
     {
         std::unordered_map<int, int> src{{1, 0}, {3, 0}, {5, 0}};
@@ -98,8 +95,6 @@ int main()
     struct hasher
     {
         hasher() = default;
-        typedef Counter<int> argument_type;
-        typedef size_t result_type;
         size_t operator()(const Counter<int>& p) const
         {
             return std::hash<Counter<int>>()(p);
@@ -158,4 +153,5 @@ int main()
             first.merge(std::move(second));
         }
     }
+    return 0;
 }

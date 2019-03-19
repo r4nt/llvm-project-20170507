@@ -1,29 +1,24 @@
 //===-- BreakpointResolverName.h --------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef liblldb_BreakpointResolverName_h_
 #define liblldb_BreakpointResolverName_h_
 
-// C Includes
-// C++ Includes
 #include <string>
 #include <vector>
 
-// Other libraries and framework includes
-// Project includes
 #include "lldb/Breakpoint/BreakpointResolver.h"
 #include "lldb/Core/Module.h"
 
 namespace lldb_private {
 
 //----------------------------------------------------------------------
-/// @class BreakpointResolverName BreakpointResolverName.h
+/// \class BreakpointResolverName BreakpointResolverName.h
 /// "lldb/Breakpoint/BreakpointResolverName.h" This class sets breakpoints on
 /// a given function name, either by exact match or by regular expression.
 //----------------------------------------------------------------------
@@ -92,7 +87,7 @@ protected:
   lldb::LanguageType m_language;
   bool m_skip_prologue;
 
-  void AddNameLookup(const ConstString &name,
+  void AddNameLookup(ConstString name,
                      lldb::FunctionNameType name_type_mask);
 };
 

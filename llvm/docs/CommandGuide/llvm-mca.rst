@@ -169,6 +169,12 @@ option specifies "``-``", then the output will also be sent to standard output.
   the theoretical uniform distribution of resource pressure for every
   instruction in sequence.
 
+.. option:: -bottleneck-analysis
+
+  Print information about bottlenecks that affect the throughput. This analysis
+  can be expensive, and it is disabled by default.  Bottlenecks are highlighted
+  in the summary view.
+
 
 EXIT STATUS
 -----------
@@ -515,6 +521,10 @@ sections.
    0,           109  (17.9%)
    1,           102  (16.7%)
    2,           399  (65.4%)
+
+  Total ROB Entries:                64
+  Max Used ROB Entries:             35  ( 54.7% )
+  Average Used ROB Entries per cy:  32  ( 50.0% )
 
 
   Register File statistics:

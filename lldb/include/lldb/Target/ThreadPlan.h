@@ -1,22 +1,17 @@
 //===-- ThreadPlan.h --------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef liblldb_ThreadPlan_h_
 #define liblldb_ThreadPlan_h_
 
-// C Includes
-// C++ Includes
 #include <mutex>
 #include <string>
 
-// Other libraries and framework includes
-// Project includes
 #include "lldb/Target/Process.h"
 #include "lldb/Target/StopInfo.h"
 #include "lldb/Target/Target.h"
@@ -371,7 +366,7 @@ public:
   //------------------------------------------------------------------
   /// Returns the name of this thread plan.
   ///
-  /// @return
+  /// \return
   ///   A const char * pointer to the thread plan's name.
   //------------------------------------------------------------------
   const char *GetName() const { return m_name.c_str(); }
@@ -379,7 +374,7 @@ public:
   //------------------------------------------------------------------
   /// Returns the Thread that is using this thread plan.
   ///
-  /// @return
+  /// \return
   ///   A  pointer to the thread plan's owning thread.
   //------------------------------------------------------------------
   Thread &GetThread() { return m_thread; }
@@ -394,10 +389,10 @@ public:
   /// Print a description of this thread to the stream \a s.
   /// \a thread.
   ///
-  /// @param[in] s
+  /// \param[in] s
   ///    The stream to which to print the description.
   ///
-  /// @param[in] level
+  /// \param[in] level
   ///    The level of description desired.  Note that eDescriptionLevelBrief
   ///    will be used in the stop message printed when the plan is complete.
   //------------------------------------------------------------------
@@ -406,12 +401,12 @@ public:
   //------------------------------------------------------------------
   /// Returns whether this plan could be successfully created.
   ///
-  /// @param[in] error
+  /// \param[in] error
   ///    A stream to which to print some reason why the plan could not be
   ///    created.
   ///    Can be NULL.
   ///
-  /// @return
+  /// \return
   ///   \b true if the plan should be queued, \b false otherwise.
   //------------------------------------------------------------------
   virtual bool ValidatePlan(Stream *error) = 0;
@@ -600,10 +595,12 @@ protected:
 
   bool IsUsuallyUnexplainedStopReason(lldb::StopReason);
 
+  Status m_status;
   Thread &m_thread;
   Vote m_stop_vote;
   Vote m_run_vote;
-  bool m_takes_iteration_count = false;
+  bool m_takes_iteration_count;
+  bool m_could_not_resolve_hw_bp;
   int32_t m_iteration_count = 1;
 
 private:
@@ -654,6 +651,8 @@ public:
   bool IsBasePlan() override { return true; }
 
   bool OkayToDiscard() override { return false; }
+
+  const Status &GetStatus() { return m_status; }
 
 protected:
   bool DoPlanExplainsStop(Event *event_ptr) override;

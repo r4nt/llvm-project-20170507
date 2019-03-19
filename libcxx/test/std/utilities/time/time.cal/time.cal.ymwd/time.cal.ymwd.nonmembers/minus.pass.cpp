@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -13,7 +12,7 @@
 
 // constexpr year_month_weekday operator-(const year_month_weekday& ymwd, const months& dm) noexcept;
 //   Returns: ymwd + (-dm).
-// 
+//
 // constexpr year_month_weekday operator-(const year_month_weekday& ymwd, const years& dy) noexcept;
 //   Returns: ymwd + (-dy).
 
@@ -51,11 +50,10 @@ constexpr bool testConstexprMonths ()
 }
 
 
-int main()
+int main(int, char**)
 {
     using year               = std::chrono::year;
     using month              = std::chrono::month;
-    using day                = std::chrono::day;
     using weekday            = std::chrono::weekday;
     using weekday_indexed    = std::chrono::weekday_indexed;
     using year_month_weekday = std::chrono::year_month_weekday;
@@ -70,7 +68,7 @@ int main()
     ASSERT_SAME_TYPE(year_month_weekday, decltype(std::declval<year_month_weekday>() - std::declval<years>()));
 
     static_assert(testConstexprYears(), "");
-    
+
     year_month_weekday ym{year{1234}, November, weekday_indexed{Tuesday, 1}};
     for (int i = 0; i <= 10; ++i)
     {
@@ -81,13 +79,13 @@ int main()
         assert(ym1.index()   == 1);
     }
     }
-    
+
     {  // year_month_weekday - months
     ASSERT_NOEXCEPT(                              std::declval<year_month_weekday>() - std::declval<months>());
     ASSERT_SAME_TYPE(year_month_weekday, decltype(std::declval<year_month_weekday>() - std::declval<months>()));
 
     static_assert(testConstexprMonths(), "");
-    
+
     year_month_weekday ym{year{1234}, November, weekday_indexed{Tuesday, 2}};
     for (unsigned i = 1; i <= 10; ++i)
     {
@@ -98,4 +96,6 @@ int main()
         assert(ym1.index()   == 2);
     }
     }
+
+  return 0;
 }

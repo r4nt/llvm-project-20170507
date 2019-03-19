@@ -1,9 +1,8 @@
 //===-- HostInfoMacOSX.mm ---------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -141,7 +140,7 @@ bool HostInfoMacOSX::ComputeSupportExeDirectory(FileSpec &file_spec) {
     raw_path.append("/../bin");
     FileSpec support_dir_spec(raw_path);
     FileSystem::Instance().Resolve(support_dir_spec);
-    if (!llvm::sys::fs::is_directory(support_dir_spec.GetPath())) {
+    if (!FileSystem::Instance().IsDirectory(support_dir_spec)) {
       Log *log = lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_HOST);
       if (log)
         log->Printf("HostInfoMacOSX::%s(): failed to find support directory",

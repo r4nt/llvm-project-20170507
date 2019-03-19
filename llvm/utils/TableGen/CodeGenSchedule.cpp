@@ -1,9 +1,8 @@
 //===- CodeGenSchedule.cpp - Scheduling MachineModels ---------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -369,24 +368,22 @@ processSTIPredicate(STIPredicateFunction &Fn,
              [&](const OpcodeMapPair &Lhs, const OpcodeMapPair &Rhs) {
                unsigned LhsIdx = Opcode2Index[Lhs.first];
                unsigned RhsIdx = Opcode2Index[Rhs.first];
-               std::pair<APInt, APInt> &LhsMasks = OpcodeMasks[LhsIdx];
-               std::pair<APInt, APInt> &RhsMasks = OpcodeMasks[RhsIdx];
+               const std::pair<APInt, APInt> &LhsMasks = OpcodeMasks[LhsIdx];
+               const std::pair<APInt, APInt> &RhsMasks = OpcodeMasks[RhsIdx];
 
-               if (LhsMasks.first != RhsMasks.first) {
-                 if (LhsMasks.first.countPopulation() <
-                     RhsMasks.first.countPopulation())
-                   return true;
-                 return LhsMasks.first.countLeadingZeros() >
-                        RhsMasks.first.countLeadingZeros();
-               }
+               auto LessThan = [](const APInt &Lhs, const APInt &Rhs) {
+                 unsigned LhsCountPopulation = Lhs.countPopulation();
+                 unsigned RhsCountPopulation = Rhs.countPopulation();
+                 return ((LhsCountPopulation < RhsCountPopulation) ||
+                         ((LhsCountPopulation == RhsCountPopulation) &&
+                          (Lhs.countLeadingZeros() > Rhs.countLeadingZeros())));
+               };
 
-               if (LhsMasks.second != RhsMasks.second) {
-                 if (LhsMasks.second.countPopulation() <
-                     RhsMasks.second.countPopulation())
-                   return true;
-                 return LhsMasks.second.countLeadingZeros() >
-                        RhsMasks.second.countLeadingZeros();
-               }
+               if (LhsMasks.first != RhsMasks.first)
+                 return LessThan(LhsMasks.first, RhsMasks.first);
+
+               if (LhsMasks.second != RhsMasks.second)
+                 return LessThan(LhsMasks.second, RhsMasks.second);
 
                return LhsIdx < RhsIdx;
              });
@@ -479,6 +476,35 @@ void CodeGenSchedModels::collectRetireControlUnits() {
   }
 }
 
+void CodeGenSchedModels::collectLoadStoreQueueInfo() {
+  RecVec Queues = Records.getAllDerivedDefinitions("MemoryQueue");
+
+  for (Record *Queue : Queues) {
+    CodeGenProcModel &PM = getProcModel(Queue->getValueAsDef("SchedModel"));
+    if (Queue->isSubClassOf("LoadQueue")) {
+      if (PM.LoadQueue) {
+        PrintError(Queue->getLoc(),
+                   "Expected a single LoadQueue definition");
+        PrintNote(PM.LoadQueue->getLoc(),
+                  "Previous definition of LoadQueue was here");
+      }
+
+      PM.LoadQueue = Queue;
+    }
+
+    if (Queue->isSubClassOf("StoreQueue")) {
+      if (PM.StoreQueue) {
+        PrintError(Queue->getLoc(),
+                   "Expected a single StoreQueue definition");
+        PrintNote(PM.LoadQueue->getLoc(),
+                  "Previous definition of StoreQueue was here");
+      }
+
+      PM.StoreQueue = Queue;
+    }
+  }
+}
+
 /// Collect optional processor information.
 void CodeGenSchedModels::collectOptionalProcessorInfo() {
   // Find register file definitions for each processor.
@@ -486,6 +512,9 @@ void CodeGenSchedModels::collectOptionalProcessorInfo() {
 
   // Collect processor RetireControlUnit descriptors if available.
   collectRetireControlUnits();
+
+  // Collect information about load/store queues.
+  collectLoadStoreQueueInfo();
 
   checkCompleteness();
 }
@@ -1904,8 +1933,9 @@ void CodeGenSchedModels::checkCompleteness() {
       unsigned SCIdx = getSchedClassIdx(*Inst);
       if (!SCIdx) {
         if (Inst->TheDef->isValueUnset("SchedRW") && !HadCompleteModel) {
-          PrintError("No schedule information for instruction '"
-                     + Inst->TheDef->getName() + "'");
+          PrintError(Inst->TheDef->getLoc(),
+                     "No schedule information for instruction '" +
+                         Inst->TheDef->getName() + "'");
           Complete = false;
         }
         continue;
@@ -1923,8 +1953,9 @@ void CodeGenSchedModels::checkCompleteness() {
         return R->getValueAsDef("SchedModel") == ProcModel.ModelDef;
       });
       if (I == InstRWs.end()) {
-        PrintError("'" + ProcModel.ModelName + "' lacks information for '" +
-                   Inst->TheDef->getName() + "'");
+        PrintError(Inst->TheDef->getLoc(), "'" + ProcModel.ModelName +
+                                               "' lacks information for '" +
+                                               Inst->TheDef->getName() + "'");
         Complete = false;
       }
     }

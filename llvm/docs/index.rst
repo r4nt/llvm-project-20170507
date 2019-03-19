@@ -55,11 +55,10 @@ User Guides
 
 For those new to the LLVM system.
 
-NOTE: If you are a user who is only interested in using LLVM-based
-compilers, you should look into `Clang <http://clang.llvm.org>`_ or
-`DragonEgg <http://dragonegg.llvm.org>`_ instead. The documentation here is
-intended for users who have a need to work with the intermediate LLVM
-representation.
+NOTE: If you are a user who is only interested in using an LLVM-based compiler,
+you should look into `Clang <http://clang.llvm.org>`_ instead. The
+documentation here is intended for users who have a need to work with the
+intermediate LLVM representation.
 
 .. toctree::
    :hidden:
@@ -232,7 +231,7 @@ For developers of applications which use LLVM as a library.
 
 `Documentation for Go bindings <http://godoc.org/llvm.org/llvm/bindings/go/llvm>`_
 
-`ViewVC Repository Browser <http://llvm.org/viewvc/>`_
+`Github Source Repository Browser <http://github.com/llvm/llvm-project//>`_
    ..
 
 :doc:`CompilerWriterInfo`
@@ -292,6 +291,7 @@ For API clients and LLVM developers.
    Statepoints
    MergeFunctions
    TypeMetadata
+   TransformMetadata
    FaultMaps
    MIRLangRef
    Coroutines
@@ -302,6 +302,7 @@ For API clients and LLVM developers.
    PDB/index
    CFIVerify
    SpeculativeLoadHardening
+   StackSafetyAnalysis
 
 :doc:`WritingAnLLVMPass`
    Information on how to write LLVM transformations and analyses.
@@ -438,6 +439,10 @@ For API clients and LLVM developers.
 :doc:`SpeculativeLoadHardening`
   A description of the Speculative Load Hardening mitigation for Spectre v1.
 
+:doc:`StackSafetyAnalysis`
+  This document describes the design of the stack safety analysis of local
+  variables.
+
 Development Process Documentation
 =================================
 
@@ -454,6 +459,7 @@ Information about LLVM's development process.
    Packaging
    ReleaseProcess
    Phabricator
+   BugLifeCycle
 
 :doc:`Contributing`
    An overview on how to contribute to LLVM.
@@ -483,6 +489,9 @@ Information about LLVM's development process.
 :doc:`Phabricator`
    Describes how to use the Phabricator code review tool hosted on
    http://reviews.llvm.org/ and its command line interface, Arcanist.
+
+:doc:`BugLifeCycle`
+   Describes how bugs are reported, triaged and closed.
 
 Community
 =========
@@ -544,7 +553,6 @@ This channel has several bots.
 
   * llvmbb - Bot for the main LLVM buildbot master.
     http://lab.llvm.org:8011/console
-  * bb-chapuni - An individually run buildbot master. http://bb.pgr.jp/console
   * smooshlab - Apple's internal buildbot master.
 
 * robot - Bugzilla linker. %bug <number>

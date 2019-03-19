@@ -1,9 +1,8 @@
 //===-- sanitizer_mac.cc --------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -108,9 +107,20 @@ extern "C" int __munmap(void *, size_t) SANITIZER_WEAK_ATTRIBUTE;
 #define VM_MEMORY_SANITIZER 99
 #endif
 
+// XNU on Darwin provides a mmap flag that optimizes allocation/deallocation of
+// giant memory regions (i.e. shadow memory regions).
+#define kXnuFastMmapFd 0x4
+static size_t kXnuFastMmapThreshold = 2 << 30; // 2 GB
+static bool use_xnu_fast_mmap = false;
+
 uptr internal_mmap(void *addr, size_t length, int prot, int flags,
                    int fd, u64 offset) {
-  if (fd == -1) fd = VM_MAKE_TAG(VM_MEMORY_SANITIZER);
+  if (fd == -1) {
+    fd = VM_MAKE_TAG(VM_MEMORY_SANITIZER);
+    if (length >= kXnuFastMmapThreshold) {
+      if (use_xnu_fast_mmap) fd |= kXnuFastMmapFd;
+    }
+  }
   if (&__mmap) return (uptr)__mmap(addr, length, prot, flags, fd, offset);
   return (uptr)mmap(addr, length, prot, flags, fd, offset);
 }
@@ -161,6 +171,10 @@ uptr internal_filesize(fd_t fd) {
   if (internal_fstat(fd, &st))
     return -1;
   return (uptr)st.st_size;
+}
+
+uptr internal_dup(int oldfd) {
+  return dup(oldfd);
 }
 
 uptr internal_dup2(int oldfd, int newfd) {
@@ -267,6 +281,8 @@ uptr internal_waitpid(int pid, int *status, int options) {
 
 // ----------------- sanitizer_common.h
 bool FileExists(const char *filename) {
+  if (ShouldMockFailureToOpen(filename))
+    return false;
   struct stat st;
   if (stat(filename, &st))
     return false;
@@ -359,6 +375,10 @@ void ReExec() {
 }
 
 void CheckASLR() {
+  // Do nothing
+}
+
+void CheckMPROTECT() {
   // Do nothing
 }
 
@@ -684,6 +704,16 @@ static void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp) {
 }
 
 void SignalContext::InitPcSpBp() { GetPcSpBp(context, &pc, &sp, &bp); }
+
+void InitializePlatformEarly() {
+  // Only use xnu_fast_mmap when on x86_64 and the OS supports it.
+  use_xnu_fast_mmap =
+#if defined(__x86_64__)
+      GetMacosVersion() >= MACOS_VERSION_HIGH_SIERRA_DOT_RELEASE_4;
+#else
+      false;
+#endif
+}
 
 #if !SANITIZER_GO
 static const char kDyldInsertLibraries[] = "DYLD_INSERT_LIBRARIES";

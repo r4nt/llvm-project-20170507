@@ -1,9 +1,8 @@
 //===-- OptionValueFileSpec.cpp ---------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,7 +13,6 @@
 #include "lldb/Interpreter/CommandCompletions.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
 #include "lldb/Utility/Args.h"
-#include "lldb/Utility/DataBufferLLVM.h"
 #include "lldb/Utility/State.h"
 
 using namespace lldb;
@@ -114,7 +112,8 @@ const lldb::DataBufferSP &OptionValueFileSpec::GetFileContents() {
     const auto file_mod_time = FileSystem::Instance().GetModificationTime(m_current_value);
     if (m_data_sp && m_data_mod_time == file_mod_time)
       return m_data_sp;
-    m_data_sp = DataBufferLLVM::CreateFromPath(m_current_value.GetPath());
+    m_data_sp =
+        FileSystem::Instance().CreateDataBuffer(m_current_value.GetPath());
     m_data_mod_time = file_mod_time;
   }
   return m_data_sp;

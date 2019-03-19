@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -28,16 +27,15 @@
 
 #include "test_macros.h"
 
-int main()
+int main(int, char**)
 {
     using year                = std::chrono::year;
     using month               = std::chrono::month;
-    using day                 = std::chrono::day;
     using month_day_last      = std::chrono::month_day_last;
     using year_month_day_last = std::chrono::year_month_day_last;
 
     ASSERT_NOEXCEPT(year_month_day_last{year{1}, month_day_last{month{1}}});
-    
+
     constexpr month January = std::chrono::January;
 
     constexpr year_month_day_last ymdl0{year{}, month_day_last{month{}}};
@@ -45,10 +43,12 @@ int main()
     static_assert( ymdl0.month()          == month{},                 "");
     static_assert( ymdl0.month_day_last() == month_day_last{month{}}, "");
     static_assert(!ymdl0.ok(),                                        "");
-    
+
     constexpr year_month_day_last ymdl1{year{2019}, month_day_last{January}};
     static_assert( ymdl1.year()           == year{2019},              "");
     static_assert( ymdl1.month()          == January,                 "");
     static_assert( ymdl1.month_day_last() == month_day_last{January}, "");
     static_assert( ymdl1.ok(),                                        "");
+
+  return 0;
 }

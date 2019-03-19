@@ -1,9 +1,8 @@
 //===- PreprocessorLexer.h - C Language Family Lexer ------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -130,11 +129,7 @@ public:
   //===--------------------------------------------------------------------===//
   // Misc. lexing methods.
 
-  /// After the preprocessor has parsed a \#include, lex and
-  /// (potentially) macro expand the filename.
-  ///
-  /// If the sequence parsed is not lexically legal, emit a diagnostic and
-  /// return a result EOD token.
+  /// Lex a token, producing a header-name token if possible.
   void LexIncludeFilename(Token &FilenameTok);
 
   /// Inform the lexer whether or not we are currently lexing a

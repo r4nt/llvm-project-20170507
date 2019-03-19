@@ -75,7 +75,6 @@
 ; CHECK-NEXT:       Merge disjoint stack slots
 ; CHECK-NEXT:       Local Stack Slot Allocation
 ; CHECK-NEXT:       Remove dead machine instructions
-; CHECK-NEXT:       X86 CondBr Folding
 ; CHECK-NEXT:       MachineDominator Tree Construction
 ; CHECK-NEXT:       Machine Natural Loop Construction
 ; CHECK-NEXT:       Machine Trace Metrics
@@ -151,7 +150,6 @@
 ; CHECK-NEXT:       ReachingDefAnalysis
 ; CHECK-NEXT:       X86 Execution Dependency Fix
 ; CHECK-NEXT:       BreakFalseDeps
-; CHECK-NEXT:       Shadow Call Stack
 ; CHECK-NEXT:       X86 Indirect Branch Tracking
 ; CHECK-NEXT:       X86 vzeroupper inserter
 ; CHECK-NEXT:       MachineDominator Tree Construction
@@ -160,6 +158,8 @@
 ; CHECK-NEXT:       X86 Atom pad short functions
 ; CHECK-NEXT:       X86 LEA Fixup
 ; CHECK-NEXT:       Compressing EVEX instrs to VEX encoding when possible
+; CHECK-NEXT:       X86 Discriminate Memory Operands
+; CHECK-NEXT:       X86 Insert Cache Prefetches
 ; CHECK-NEXT:       Contiguously Lay Out Funclets
 ; CHECK-NEXT:       StackMap Liveness Analysis
 ; CHECK-NEXT:       Live DEBUG_VALUE analysis

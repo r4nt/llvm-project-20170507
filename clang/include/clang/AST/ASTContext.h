@@ -1,9 +1,8 @@
 //===- ASTContext.h - Context to hold long-lived AST nodes ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +14,7 @@
 #ifndef LLVM_CLANG_AST_ASTCONTEXT_H
 #define LLVM_CLANG_AST_ASTCONTEXT_H
 
+#include "clang/AST/ASTContextAllocate.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/CanonicalType.h"
 #include "clang/AST/CommentCommandTraits.h"
@@ -569,26 +569,6 @@ public:
   IntrusiveRefCntPtr<ExternalASTSource> ExternalSource;
   ASTMutationListener *Listener = nullptr;
 
-  /// Contains parents of a node.
-  using ParentVector = llvm::SmallVector<ast_type_traits::DynTypedNode, 2>;
-
-  /// Maps from a node to its parents. This is used for nodes that have
-  /// pointer identity only, which are more common and we can save space by
-  /// only storing a unique pointer to them.
-  using ParentMapPointers =
-      llvm::DenseMap<const void *,
-                     llvm::PointerUnion4<const Decl *, const Stmt *,
-                                         ast_type_traits::DynTypedNode *,
-                                         ParentVector *>>;
-
-  /// Parent map for nodes without pointer identity. We store a full
-  /// DynTypedNode for all keys.
-  using ParentMapOtherNodes =
-      llvm::DenseMap<ast_type_traits::DynTypedNode,
-                     llvm::PointerUnion4<const Decl *, const Stmt *,
-                                         ast_type_traits::DynTypedNode *,
-                                         ParentVector *>>;
-
   /// Container for either a single DynTypedNode or for an ArrayRef to
   /// DynTypedNode. For use with ParentMap.
   class DynTypedNodeList {
@@ -630,7 +610,17 @@ public:
     }
   };
 
-  /// Returns the parents of the given node.
+  // A traversal scope limits the parts of the AST visible to certain analyses.
+  // RecursiveASTVisitor::TraverseAST will only visit reachable nodes, and
+  // getParents() will only observe reachable parent edges.
+  //
+  // The scope is defined by a set of "top-level" declarations.
+  // Initially, it is the entire TU: {getTranslationUnitDecl()}.
+  // Changing the scope clears the parent cache, which is expensive to rebuild.
+  std::vector<Decl *> getTraversalScope() const { return TraversalScope; }
+  void setTraversalScope(const std::vector<Decl *> &);
+
+  /// Returns the parents of the given node (within the traversal scope).
   ///
   /// Note that this will lazily compute the parents of all nodes
   /// and store them for later retrieval. Thus, the first call is O(n)
@@ -1062,6 +1052,9 @@ public:
   CanQualType OCLSamplerTy, OCLEventTy, OCLClkEventTy;
   CanQualType OCLQueueTy, OCLReserveIDTy;
   CanQualType OMPArraySectionTy;
+#define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
+  CanQualType Id##Ty;
+#include "clang/Basic/OpenCLExtensionTypes.def"
 
   // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
   mutable QualType AutoDeductTy;     // Deduction against 'auto'.
@@ -2009,6 +2002,9 @@ public:
     /// No error
     GE_None,
 
+    /// Missing a type
+    GE_Missing_type,
+
     /// Missing a type from <stdio.h>
     GE_Missing_stdio,
 
@@ -2091,6 +2087,16 @@ public:
   /// characters.
   CharUnits getTypeSizeInChars(QualType T) const;
   CharUnits getTypeSizeInChars(const Type *T) const;
+
+  Optional<CharUnits> getTypeSizeInCharsIfKnown(QualType Ty) const {
+    if (Ty->isIncompleteType() || Ty->isDependentType())
+      return None;
+    return getTypeSizeInChars(Ty);
+  }
+
+  Optional<CharUnits> getTypeSizeInCharsIfKnown(const Type *Ty) const {
+    return getTypeSizeInCharsIfKnown(QualType(Ty, 0));
+  }
 
   /// Return the ABI-specified alignment of a (complete) type \p T, in
   /// bits.
@@ -2231,7 +2237,8 @@ public:
 
   VTableContextBase *getVTableContext();
 
-  MangleContext *createMangleContext();
+  /// If \p T is null pointer, assume the target in ASTContext.
+  MangleContext *createMangleContext(const TargetInfo *T = nullptr);
 
   void DeepCollectObjCIvars(const ObjCInterfaceDecl *OI, bool leafClass,
                             SmallVectorImpl<const ObjCIvarDecl*> &Ivars) const;
@@ -2494,6 +2501,11 @@ public:
   /// \p LHS < \p RHS, return -1.
   int getFloatingTypeOrder(QualType LHS, QualType RHS) const;
 
+  /// Compare the rank of two floating point types as above, but compare equal
+  /// if both types have the same floating-point semantics on the target (i.e.
+  /// long double and double on AArch64 will return 0).
+  int getFloatingTypeSemanticOrder(QualType LHS, QualType RHS) const;
+
   /// Return a real floating point or a complex type (based on
   /// \p typeDomain/\p typeSize).
   ///
@@ -2629,6 +2641,12 @@ public:
   // Per ISO N1169, this method accepts fixed point types and returns the
   // corresponding saturated type for a given fixed point type.
   QualType getCorrespondingSaturatedType(QualType Ty) const;
+
+  // This method accepts fixed point types and returns the corresponding signed
+  // type. Unlike getCorrespondingUnsignedType(), this only accepts unsigned
+  // fixed point types because there are unsigned integer types like bool and
+  // char8_t that don't have signed equivalents.
+  QualType getCorrespondingSignedFixedPointType(QualType Ty) const;
 
   //===--------------------------------------------------------------------===//
   //                    Integer Values
@@ -2791,46 +2809,46 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// The number of implicitly-declared default constructors.
-  static unsigned NumImplicitDefaultConstructors;
+  unsigned NumImplicitDefaultConstructors = 0;
 
   /// The number of implicitly-declared default constructors for
   /// which declarations were built.
-  static unsigned NumImplicitDefaultConstructorsDeclared;
+  unsigned NumImplicitDefaultConstructorsDeclared = 0;
 
   /// The number of implicitly-declared copy constructors.
-  static unsigned NumImplicitCopyConstructors;
+  unsigned NumImplicitCopyConstructors = 0;
 
   /// The number of implicitly-declared copy constructors for
   /// which declarations were built.
-  static unsigned NumImplicitCopyConstructorsDeclared;
+  unsigned NumImplicitCopyConstructorsDeclared = 0;
 
   /// The number of implicitly-declared move constructors.
-  static unsigned NumImplicitMoveConstructors;
+  unsigned NumImplicitMoveConstructors = 0;
 
   /// The number of implicitly-declared move constructors for
   /// which declarations were built.
-  static unsigned NumImplicitMoveConstructorsDeclared;
+  unsigned NumImplicitMoveConstructorsDeclared = 0;
 
   /// The number of implicitly-declared copy assignment operators.
-  static unsigned NumImplicitCopyAssignmentOperators;
+  unsigned NumImplicitCopyAssignmentOperators = 0;
 
   /// The number of implicitly-declared copy assignment operators for
   /// which declarations were built.
-  static unsigned NumImplicitCopyAssignmentOperatorsDeclared;
+  unsigned NumImplicitCopyAssignmentOperatorsDeclared = 0;
 
   /// The number of implicitly-declared move assignment operators.
-  static unsigned NumImplicitMoveAssignmentOperators;
+  unsigned NumImplicitMoveAssignmentOperators = 0;
 
   /// The number of implicitly-declared move assignment operators for
   /// which declarations were built.
-  static unsigned NumImplicitMoveAssignmentOperatorsDeclared;
+  unsigned NumImplicitMoveAssignmentOperatorsDeclared = 0;
 
   /// The number of implicitly-declared destructors.
-  static unsigned NumImplicitDestructors;
+  unsigned NumImplicitDestructors = 0;
 
   /// The number of implicitly-declared destructors for which
   /// declarations were built.
-  static unsigned NumImplicitDestructorsDeclared;
+  unsigned NumImplicitDestructorsDeclared = 0;
 
 public:
   /// Initialize built-in types.
@@ -2921,13 +2939,13 @@ private:
   // but we include it here so that ASTContext can quickly deallocate them.
   llvm::PointerIntPair<StoredDeclsMap *, 1> LastSDM;
 
-  std::unique_ptr<ParentMapPointers> PointerParents;
-  std::unique_ptr<ParentMapOtherNodes> OtherParents;
+  std::vector<Decl *> TraversalScope;
+  class ParentMap;
+  std::unique_ptr<ParentMap> Parents;
 
   std::unique_ptr<VTableContextBase> VTContext;
 
   void ReleaseDeclContextMaps();
-  void ReleaseParentMapEntries();
 
 public:
   enum PragmaSectionFlag : unsigned {
@@ -2976,8 +2994,8 @@ inline Selector GetUnarySelector(StringRef name, ASTContext &Ctx) {
 /// This placement form of operator new uses the ASTContext's allocator for
 /// obtaining memory.
 ///
-/// IMPORTANT: These are also declared in clang/AST/AttrIterator.h! Any changes
-/// here need to also be made there.
+/// IMPORTANT: These are also declared in clang/AST/ASTContextAllocate.h!
+/// Any changes here need to also be made there.
 ///
 /// We intentionally avoid using a nothrow specification here so that the calls
 /// to this operator will not perform a null check on the result -- the
@@ -3000,7 +3018,7 @@ inline Selector GetUnarySelector(StringRef name, ASTContext &Ctx) {
 ///                  allocator supports it).
 /// @return The allocated memory. Could be nullptr.
 inline void *operator new(size_t Bytes, const clang::ASTContext &C,
-                          size_t Alignment) {
+                          size_t Alignment /* = 8 */) {
   return C.Allocate(Bytes, Alignment);
 }
 
@@ -3038,7 +3056,7 @@ inline void operator delete(void *Ptr, const clang::ASTContext &C, size_t) {
 ///                  allocator supports it).
 /// @return The allocated memory. Could be nullptr.
 inline void *operator new[](size_t Bytes, const clang::ASTContext& C,
-                            size_t Alignment = 8) {
+                            size_t Alignment /* = 8 */) {
   return C.Allocate(Bytes, Alignment);
 }
 

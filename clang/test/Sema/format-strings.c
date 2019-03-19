@@ -613,6 +613,13 @@ void pr12761(char c) {
   printf("%hhx", c);
 }
 
+void test_opencl_vector_format(int x) {
+  printf("%v4d", x); // expected-warning{{invalid conversion specifier 'v'}}
+  printf("%vd", x); // expected-warning{{invalid conversion specifier 'v'}}
+  printf("%0vd", x); // expected-warning{{invalid conversion specifier 'v'}}
+  printf("%hlf", x); // expected-warning{{invalid conversion specifier 'l'}}
+  printf("%hld", x); // expected-warning{{invalid conversion specifier 'l'}}
+}
 
 // Test that we correctly merge the format in both orders.
 extern void test14_foo(const char *, const char *, ...)

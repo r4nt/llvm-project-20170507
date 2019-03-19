@@ -1,9 +1,8 @@
 //===- ParallelDSP.cpp - Parallel DSP Pass --------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -54,7 +53,7 @@ namespace {
   using OpChainList     = SmallVector<std::unique_ptr<OpChain>, 8>;
   using ReductionList   = SmallVector<Reduction, 8>;
   using ValueList       = SmallVector<Value*, 8>;
-  using MemInstList     = SmallVector<Instruction*, 8>;
+  using MemInstList     = SmallVector<LoadInst*, 8>;
   using PMACPair        = std::pair<BinOpChain*,BinOpChain*>;
   using PMACPairList    = SmallVector<PMACPair, 8>;
   using Instructions    = SmallVector<Instruction*,16>;
@@ -99,6 +98,8 @@ namespace {
         for (auto *V : RHS)
           AllValues.push_back(V);
       }
+
+    bool AreSymmetrical(BinOpChain *Other);
   };
 
   struct Reduction {
@@ -106,10 +107,25 @@ namespace {
                                       // pattern matching.
     Instruction     *AccIntAdd;       // The accumulating integer add statement,
                                       // i.e, the reduction statement.
-
     OpChainList     MACCandidates;    // The MAC candidates associated with
                                       // this reduction statement.
+    PMACPairList    PMACPairs;
     Reduction (PHINode *P, Instruction *Acc) : Phi(P), AccIntAdd(Acc) { };
+  };
+
+  class WidenedLoad {
+    LoadInst *NewLd = nullptr;
+    SmallVector<LoadInst*, 4> Loads;
+
+  public:
+    WidenedLoad(SmallVectorImpl<LoadInst*> &Lds, LoadInst *Wide)
+      : NewLd(Wide) {
+      for (auto *I : Lds)
+        Loads.push_back(I);
+    }
+    LoadInst *getLoad() {
+      return NewLd;
+    }
   };
 
   class ARMParallelDSP : public LoopPass {
@@ -121,11 +137,18 @@ namespace {
     Loop              *L;
     const DataLayout  *DL;
     Module            *M;
+    std::map<LoadInst*, LoadInst*> LoadPairs;
+    std::map<LoadInst*, std::unique_ptr<WidenedLoad>> WideLoads;
 
-    bool InsertParallelMACs(Reduction &Reduction, PMACPairList &PMACPairs);
+    bool RecordSequentialLoads(BasicBlock *BB);
+    bool InsertParallelMACs(Reduction &Reduction);
     bool AreSequentialLoads(LoadInst *Ld0, LoadInst *Ld1, MemInstList &VecMem);
-    PMACPairList CreateParallelMACPairs(OpChainList &Candidates);
-    Instruction *CreateSMLADCall(LoadInst *VecLd0, LoadInst *VecLd1,
+    LoadInst* CreateLoadIns(IRBuilder<NoFolder> &IRB,
+                            SmallVectorImpl<LoadInst*> &Loads,
+                            IntegerType *LoadTy);
+    void CreateParallelMACPairs(Reduction &R);
+    Instruction *CreateSMLADCall(SmallVectorImpl<LoadInst*> &VecLd0,
+                                 SmallVectorImpl<LoadInst*> &VecLd1,
                                  Instruction *Acc, bool Exchange,
                                  Instruction *InsertAfter);
 
@@ -178,6 +201,12 @@ namespace {
         return false;
       }
 
+      // We need a preheader as getIncomingValueForBlock assumes there is one.
+      if (!TheLoop->getLoopPreheader()) {
+        LLVM_DEBUG(dbgs() << "No preheader found, bailing out\n");
+        return false;
+      }
+
       Function &F = *Header->getParent();
       M = F.getParent();
       DL = &M->getDataLayout();
@@ -197,12 +226,23 @@ namespace {
         return false;
       }
 
+      if (!ST->isLittle()) {
+        LLVM_DEBUG(dbgs() << "Only supporting little endian: not running pass "
+                             "ARMParallelDSP\n");
+        return false;
+      }
+
       LoopAccessInfo LAI(L, SE, TLI, AA, DT, LI);
-      bool Changes = false;
 
       LLVM_DEBUG(dbgs() << "\n== Parallel DSP pass ==\n");
       LLVM_DEBUG(dbgs() << " - " << F.getName() << "\n\n");
-      Changes = MatchSMLAD(F);
+
+      if (!RecordSequentialLoads(Header)) {
+        LLVM_DEBUG(dbgs() << " - No sequential loads found.\n");
+        return false;
+      }
+
+      bool Changes = MatchSMLAD(F);
       return Changes;
     }
   };
@@ -215,7 +255,6 @@ namespace {
 // why we check that types are equal to MaxBitWidth, and not <= MaxBitWidth.
 template<unsigned MaxBitWidth>
 static bool IsNarrowSequence(Value *V, ValueList &VL) {
-  LLVM_DEBUG(dbgs() << "Is narrow sequence? "; V->dump());
   ConstantInt *CInt;
 
   if (match(V, m_ConstantInt(CInt))) {
@@ -234,82 +273,25 @@ static bool IsNarrowSequence(Value *V, ValueList &VL) {
   } else if (match(V, m_Add(m_Value(LHS), m_Value(RHS)))) {
     // TODO: we need to implement sadd16/sadd8 for this, which enables to
     // also do the rewrite for smlad8.ll, but it is unsupported for now.
-    LLVM_DEBUG(dbgs() << "No, unsupported Op:\t"; I->dump());
     return false;
   } else if (match(V, m_ZExtOrSExt(m_Value(Val)))) {
-    if (cast<CastInst>(I)->getSrcTy()->getIntegerBitWidth() != MaxBitWidth) {
-      LLVM_DEBUG(dbgs() << "No, wrong SrcTy size: " <<
-        cast<CastInst>(I)->getSrcTy()->getIntegerBitWidth() << "\n");
+    if (cast<CastInst>(I)->getSrcTy()->getIntegerBitWidth() != MaxBitWidth)
       return false;
-    }
 
     if (match(Val, m_Load(m_Value()))) {
-      LLVM_DEBUG(dbgs() << "Yes, found narrow Load:\t"; Val->dump());
       VL.push_back(Val);
       VL.push_back(I);
       return true;
     }
   }
-  LLVM_DEBUG(dbgs() << "No, unsupported Op:\t"; I->dump());
   return false;
-}
-
-// Element-by-element comparison of Value lists returning true if they are
-// instructions with the same opcode or constants with the same value.
-static bool AreSymmetrical(const ValueList &VL0,
-                           const ValueList &VL1) {
-  if (VL0.size() != VL1.size()) {
-    LLVM_DEBUG(dbgs() << "Muls are mismatching operand list lengths: "
-                      << VL0.size() << " != " << VL1.size() << "\n");
-    return false;
-  }
-
-  const unsigned Pairs = VL0.size();
-  LLVM_DEBUG(dbgs() << "Number of operand pairs: " << Pairs << "\n");
-
-  for (unsigned i = 0; i < Pairs; ++i) {
-    const Value *V0 = VL0[i];
-    const Value *V1 = VL1[i];
-    const auto *Inst0 = dyn_cast<Instruction>(V0);
-    const auto *Inst1 = dyn_cast<Instruction>(V1);
-
-    LLVM_DEBUG(dbgs() << "Pair " << i << ":\n";
-               dbgs() << "mul1: "; V0->dump();
-               dbgs() << "mul2: "; V1->dump());
-
-    if (!Inst0 || !Inst1)
-      return false;
-
-    if (Inst0->isSameOperationAs(Inst1)) {
-      LLVM_DEBUG(dbgs() << "OK: same operation found!\n");
-      continue;
-    }
-
-    const APInt *C0, *C1;
-    if (!(match(V0, m_APInt(C0)) && match(V1, m_APInt(C1)) && C0 == C1))
-      return false;
-  }
-
-  LLVM_DEBUG(dbgs() << "OK: found symmetrical operand lists.\n");
-  return true;
 }
 
 template<typename MemInst>
 static bool AreSequentialAccesses(MemInst *MemOp0, MemInst *MemOp1,
-                                  MemInstList &VecMem, const DataLayout &DL,
-                                  ScalarEvolution &SE) {
-  if (!MemOp0->isSimple() || !MemOp1->isSimple()) {
-    LLVM_DEBUG(dbgs() << "No, not touching volatile access\n");
-    return false;
-  }
-  if (isConsecutiveAccess(MemOp0, MemOp1, DL, SE)) {
-    VecMem.clear();
-    VecMem.push_back(MemOp0);
-    VecMem.push_back(MemOp1);
-    LLVM_DEBUG(dbgs() << "OK: accesses are consecutive.\n");
+                                  const DataLayout &DL, ScalarEvolution &SE) {
+  if (isConsecutiveAccess(MemOp0, MemOp1, DL, SE))
     return true;
-  }
-  LLVM_DEBUG(dbgs() << "No, accesses aren't consecutive.\n");
   return false;
 }
 
@@ -318,26 +300,110 @@ bool ARMParallelDSP::AreSequentialLoads(LoadInst *Ld0, LoadInst *Ld1,
   if (!Ld0 || !Ld1)
     return false;
 
-  LLVM_DEBUG(dbgs() << "Are consecutive loads:\n";
+  if (!LoadPairs.count(Ld0) || LoadPairs[Ld0] != Ld1)
+    return false;
+
+  LLVM_DEBUG(dbgs() << "Loads are sequential and valid:\n";
     dbgs() << "Ld0:"; Ld0->dump();
     dbgs() << "Ld1:"; Ld1->dump();
   );
 
-  if (!Ld0->hasOneUse() || !Ld1->hasOneUse()) {
-    LLVM_DEBUG(dbgs() << "No, load has more than one use.\n");
-    return false;
-  }
-
-  return AreSequentialAccesses<LoadInst>(Ld0, Ld1, VecMem, *DL, *SE);
+  VecMem.clear();
+  VecMem.push_back(Ld0);
+  VecMem.push_back(Ld1);
+  return true;
 }
 
-PMACPairList
-ARMParallelDSP::CreateParallelMACPairs(OpChainList &Candidates) {
+/// Iterate through the block and record base, offset pairs of loads as well as
+/// maximal sequences of sequential loads.
+bool ARMParallelDSP::RecordSequentialLoads(BasicBlock *BB) {
+  SmallVector<LoadInst*, 8> Loads;
+  for (auto &I : *BB) {
+    auto *Ld = dyn_cast<LoadInst>(&I);
+    if (!Ld || !Ld->isSimple() ||
+        !Ld->hasOneUse() || !isa<SExtInst>(Ld->user_back()))
+      continue;
+    Loads.push_back(Ld);
+  }
+
+  for (auto *Ld0 : Loads) {
+    for (auto *Ld1 : Loads) {
+      if (Ld0 == Ld1)
+        continue;
+
+      if (AreSequentialAccesses<LoadInst>(Ld0, Ld1, *DL, *SE)) {
+        LoadPairs[Ld0] = Ld1;
+        break;
+      }
+    }
+  }
+
+  LLVM_DEBUG(if (!LoadPairs.empty()) {
+               dbgs() << "Consecutive load pairs:\n";
+               for (auto &MapIt : LoadPairs) {
+                 LLVM_DEBUG(dbgs() << *MapIt.first << ", "
+                            << *MapIt.second << "\n");
+               }
+             });
+  return LoadPairs.size() > 1;
+}
+
+void ARMParallelDSP::CreateParallelMACPairs(Reduction &R) {
+  OpChainList &Candidates = R.MACCandidates;
+  PMACPairList &PMACPairs = R.PMACPairs;
   const unsigned Elems = Candidates.size();
-  PMACPairList PMACPairs;
 
   if (Elems < 2)
-    return PMACPairs;
+    return;
+
+  auto CanPair = [&](BinOpChain *PMul0, BinOpChain *PMul1) {
+    if (!PMul0->AreSymmetrical(PMul1))
+      return false;
+
+    // The first elements of each vector should be loads with sexts. If we
+    // find that its two pairs of consecutive loads, then these can be
+    // transformed into two wider loads and the users can be replaced with
+    // DSP intrinsics.
+    for (unsigned x = 0; x < PMul0->LHS.size(); x += 2) {
+      auto *Ld0 = dyn_cast<LoadInst>(PMul0->LHS[x]);
+      auto *Ld1 = dyn_cast<LoadInst>(PMul1->LHS[x]);
+      auto *Ld2 = dyn_cast<LoadInst>(PMul0->RHS[x]);
+      auto *Ld3 = dyn_cast<LoadInst>(PMul1->RHS[x]);
+
+      if (!Ld0 || !Ld1 || !Ld2 || !Ld3)
+        return false;
+
+      LLVM_DEBUG(dbgs() << "Loads:\n"
+                 << " - " << *Ld0 << "\n"
+                 << " - " << *Ld1 << "\n"
+                 << " - " << *Ld2 << "\n"
+                 << " - " << *Ld3 << "\n");
+
+      if (AreSequentialLoads(Ld0, Ld1, PMul0->VecLd)) {
+        if (AreSequentialLoads(Ld2, Ld3, PMul1->VecLd)) {
+          LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
+          PMACPairs.push_back(std::make_pair(PMul0, PMul1));
+          return true;
+        } else if (AreSequentialLoads(Ld3, Ld2, PMul1->VecLd)) {
+          LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
+          LLVM_DEBUG(dbgs() << "    exchanging Ld2 and Ld3\n");
+          PMul1->Exchange = true;
+          PMACPairs.push_back(std::make_pair(PMul0, PMul1));
+          return true;
+        }
+      } else if (AreSequentialLoads(Ld1, Ld0, PMul0->VecLd) &&
+                 AreSequentialLoads(Ld2, Ld3, PMul1->VecLd)) {
+        LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
+        LLVM_DEBUG(dbgs() << "    exchanging Ld0 and Ld1\n");
+        LLVM_DEBUG(dbgs() << "    and swapping muls\n");
+        PMul0->Exchange = true;
+        // Only the second operand can be exchanged, so swap the muls.
+        PMACPairs.push_back(std::make_pair(PMul1, PMul0));
+        return true;
+      }
+    }
+    return false;
+  };
 
   SmallPtrSet<const Instruction*, 4> Paired;
   for (unsigned i = 0; i < Elems; ++i) {
@@ -360,90 +426,28 @@ ARMParallelDSP::CreateParallelMACPairs(OpChainList &Candidates) {
 
       assert(PMul0 != PMul1 && "expected different chains");
 
-      LLVM_DEBUG(dbgs() << "\nCheck parallel muls:\n";
-                 dbgs() << "- "; Mul0->dump();
-                 dbgs() << "- "; Mul1->dump());
-
-      const ValueList &Mul0_LHS = PMul0->LHS;
-      const ValueList &Mul0_RHS = PMul0->RHS;
-      const ValueList &Mul1_LHS = PMul1->LHS;
-      const ValueList &Mul1_RHS = PMul1->RHS;
-
-      if (!AreSymmetrical(Mul0_LHS, Mul1_LHS) ||
-          !AreSymmetrical(Mul0_RHS, Mul1_RHS))
-        continue;
-
-      LLVM_DEBUG(dbgs() << "OK: mul operands list match:\n");
-      // The first elements of each vector should be loads with sexts. If we
-      // find that its two pairs of consecutive loads, then these can be
-      // transformed into two wider loads and the users can be replaced with
-      // DSP intrinsics.
-      bool Found = false;
-      for (unsigned x = 0; x < Mul0_LHS.size(); x += 2) {
-        auto *Ld0 = dyn_cast<LoadInst>(Mul0_LHS[x]);
-        auto *Ld1 = dyn_cast<LoadInst>(Mul1_LHS[x]);
-        auto *Ld2 = dyn_cast<LoadInst>(Mul0_RHS[x]);
-        auto *Ld3 = dyn_cast<LoadInst>(Mul1_RHS[x]);
-
-        if (!Ld0 || !Ld1 || !Ld2 || !Ld3)
-          continue;
-
-        LLVM_DEBUG(dbgs() << "Looking at operands " << x << ":\n"
-                   << "\t Ld0: " << *Ld0 << "\n"
-                   << "\t Ld1: " << *Ld1 << "\n"
-                   << "and operands " << x + 2 << ":\n"
-                   << "\t Ld2: " << *Ld2 << "\n"
-                   << "\t Ld3: " << *Ld3 << "\n");
-
-        if (AreSequentialLoads(Ld0, Ld1, PMul0->VecLd)) {
-          if (AreSequentialLoads(Ld2, Ld3, PMul1->VecLd)) {
-            LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
-            PMACPairs.push_back(std::make_pair(PMul0, PMul1));
-            Found = true;
-          } else if (AreSequentialLoads(Ld3, Ld2, PMul1->VecLd)) {
-            LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
-            LLVM_DEBUG(dbgs() << "    exchanging Ld2 and Ld3\n");
-            PMul1->Exchange = true;
-            PMACPairs.push_back(std::make_pair(PMul0, PMul1));
-            Found = true;
-          }
-        } else if (AreSequentialLoads(Ld1, Ld0, PMul0->VecLd)) {
-          if (AreSequentialLoads(Ld2, Ld3, PMul1->VecLd)) {
-            LLVM_DEBUG(dbgs() << "OK: found two pairs of parallel loads!\n");
-            LLVM_DEBUG(dbgs() << "    exchanging Ld0 and Ld1\n");
-            LLVM_DEBUG(dbgs() << "    and swapping muls\n");
-            PMul0->Exchange = true;
-            // Only the second operand can be exchanged, so swap the muls.
-            PMACPairs.push_back(std::make_pair(PMul1, PMul0));
-            Found = true;
-          }
-        }
-      }
-      if (Found) {
+      if (CanPair(PMul0, PMul1)) {
         Paired.insert(Mul0);
         Paired.insert(Mul1);
         break;
       }
     }
   }
-  return PMACPairs;
 }
 
-bool ARMParallelDSP::InsertParallelMACs(Reduction &Reduction,
-                                        PMACPairList &PMACPairs) {
+bool ARMParallelDSP::InsertParallelMACs(Reduction &Reduction) {
   Instruction *Acc = Reduction.Phi;
   Instruction *InsertAfter = Reduction.AccIntAdd;
 
-  for (auto &Pair : PMACPairs) {
+  for (auto &Pair : Reduction.PMACPairs) {
     BinOpChain *PMul0 = Pair.first;
     BinOpChain *PMul1 = Pair.second;
     LLVM_DEBUG(dbgs() << "Found parallel MACs!!\n";
                dbgs() << "- "; PMul0->Root->dump();
                dbgs() << "- "; PMul1->Root->dump());
 
-    auto *VecLd0 = cast<LoadInst>(PMul0->VecLd[0]);
-    auto *VecLd1 = cast<LoadInst>(PMul1->VecLd[0]);
-    Acc = CreateSMLADCall(VecLd0, VecLd1, Acc, PMul1->Exchange, InsertAfter);
+    Acc = CreateSMLADCall(PMul0->VecLd, PMul1->VecLd, Acc, PMul1->Exchange,
+                          InsertAfter);
     InsertAfter = Acc;
   }
 
@@ -461,12 +465,6 @@ static void MatchReductions(Function &F, Loop *TheLoop, BasicBlock *Header,
   const bool HasFnNoNaNAttr =
     F.getFnAttribute("no-nans-fp-math").getValueAsString() == "true";
   const BasicBlock *Latch = TheLoop->getLoopLatch();
-
-  // We need a preheader as getIncomingValueForBlock assumes there is one.
-  if (!TheLoop->getLoopPreheader()) {
-    LLVM_DEBUG(dbgs() << "No preheader found, bailing out\n");
-    return;
-  }
 
   for (PHINode &Phi : Header->phis()) {
     const auto *Ty = Phi.getType();
@@ -499,14 +497,12 @@ static void MatchReductions(Function &F, Loop *TheLoop, BasicBlock *Header,
 static void AddMACCandidate(OpChainList &Candidates,
                             Instruction *Mul,
                             Value *MulOp0, Value *MulOp1) {
-  LLVM_DEBUG(dbgs() << "OK, found acc mul:\t"; Mul->dump());
   assert(Mul->getOpcode() == Instruction::Mul &&
          "expected mul instruction");
   ValueList LHS;
   ValueList RHS;
   if (IsNarrowSequence<16>(MulOp0, LHS) &&
       IsNarrowSequence<16>(MulOp1, RHS)) {
-    LLVM_DEBUG(dbgs() << "OK, found narrow mul: "; Mul->dump());
     Candidates.push_back(make_unique<BinOpChain>(Mul, LHS, RHS));
   }
 }
@@ -514,7 +510,7 @@ static void AddMACCandidate(OpChainList &Candidates,
 static void MatchParallelMACSequences(Reduction &R,
                                       OpChainList &Candidates) {
   Instruction *Acc = R.AccIntAdd;
-  LLVM_DEBUG(dbgs() << "\n- Analysing:\t" << *Acc);
+  LLVM_DEBUG(dbgs() << "\n- Analysing:\t" << *Acc << "\n");
 
   // Returns false to signal the search should be stopped.
   std::function<bool(Value*)> Match =
@@ -524,26 +520,20 @@ static void MatchParallelMACSequences(Reduction &R,
     if (!I)
       return false;
 
-    Value *MulOp0, *MulOp1;
-
     switch (I->getOpcode()) {
     case Instruction::Add:
       if (Match(I->getOperand(0)) || (Match(I->getOperand(1))))
         return true;
       break;
-    case Instruction::Mul:
-      if (match (I, (m_Mul(m_Value(MulOp0), m_Value(MulOp1))))) {
+    case Instruction::Mul: {
+      Value *MulOp0 = I->getOperand(0);
+      Value *MulOp1 = I->getOperand(1);
+      if (isa<SExtInst>(MulOp0) && isa<SExtInst>(MulOp1))
         AddMACCandidate(Candidates, I, MulOp0, MulOp1);
-        return false;
-      }
-      break;
+      return false;
+    }
     case Instruction::SExt:
-      if (match (I, (m_SExt(m_Mul(m_Value(MulOp0), m_Value(MulOp1)))))) {
-        Instruction *Mul = cast<Instruction>(I->getOperand(0));
-        AddMACCandidate(Candidates, Mul, MulOp0, MulOp1);
-        return false;
-      }
-      break;
+      return Match(I->getOperand(0));
     }
     return false;
   };
@@ -685,40 +675,89 @@ bool ARMParallelDSP::MatchSMLAD(Function &F) {
   for (auto &R : Reductions) {
     if (AreAliased(AA, Reads, Writes, R.MACCandidates))
       return false;
-    PMACPairList PMACPairs = CreateParallelMACPairs(R.MACCandidates);
-    Changed |= InsertParallelMACs(R, PMACPairs);
+    CreateParallelMACPairs(R);
+    Changed |= InsertParallelMACs(R);
   }
 
   LLVM_DEBUG(if (Changed) dbgs() << "Header block:\n"; Header->dump(););
   return Changed;
 }
 
-static LoadInst *CreateLoadIns(IRBuilder<NoFolder> &IRB, LoadInst &BaseLoad,
-                               const Type *LoadTy) {
-  const unsigned AddrSpace = BaseLoad.getPointerAddressSpace();
-
-  Value *VecPtr = IRB.CreateBitCast(BaseLoad.getPointerOperand(),
+LoadInst* ARMParallelDSP::CreateLoadIns(IRBuilder<NoFolder> &IRB,
+                                        SmallVectorImpl<LoadInst*> &Loads,
+                                        IntegerType *LoadTy) {
+  assert(Loads.size() == 2 && "currently only support widening two loads");
+ 
+  const unsigned AddrSpace = Loads[0]->getPointerAddressSpace();
+  Value *VecPtr = IRB.CreateBitCast(Loads[0]->getPointerOperand(),
                                     LoadTy->getPointerTo(AddrSpace));
-  return IRB.CreateAlignedLoad(VecPtr, BaseLoad.getAlignment());
+  LoadInst *WideLoad = IRB.CreateAlignedLoad(LoadTy, VecPtr,
+                                             Loads[0]->getAlignment());
+  // Fix up users, Loads[0] needs trunc while Loads[1] needs a lshr and trunc.
+  Instruction *SExt0 = dyn_cast<SExtInst>(Loads[0]->user_back());
+  Instruction *SExt1 = dyn_cast<SExtInst>(Loads[1]->user_back());
+
+  assert((Loads[0]->hasOneUse() && Loads[1]->hasOneUse() && SExt0 && SExt1) &&
+         "Loads should have a single, extending, user");
+
+  std::function<void(Instruction*, Instruction*)> MoveAfter =
+    [&](Instruction* Source, Instruction* Sink) -> void {
+    if (DT->dominates(Source, Sink) ||
+        Source->getParent() != Sink->getParent() ||
+        isa<PHINode>(Source) || isa<PHINode>(Sink))
+      return;
+
+    Sink->moveAfter(Source);
+    for (auto &U : Sink->uses())
+      MoveAfter(Sink, cast<Instruction>(U.getUser()));
+  };
+
+  // From the wide load, create two values that equal the original two loads.
+  Value *Bottom = IRB.CreateTrunc(WideLoad, Loads[0]->getType());
+  SExt0->setOperand(0, Bottom);
+  if (auto *I = dyn_cast<Instruction>(Bottom)) {
+    I->moveAfter(WideLoad);
+    MoveAfter(I, SExt0);
+  }
+
+  IntegerType *Ld1Ty = cast<IntegerType>(Loads[1]->getType());
+  Value *ShiftVal = ConstantInt::get(LoadTy, Ld1Ty->getBitWidth());
+  Value *Top = IRB.CreateLShr(WideLoad, ShiftVal);
+  if (auto *I = dyn_cast<Instruction>(Top))
+    MoveAfter(WideLoad, I);
+
+  Value *Trunc = IRB.CreateTrunc(Top, Ld1Ty);
+  SExt1->setOperand(0, Trunc);
+  if (auto *I = dyn_cast<Instruction>(Trunc))
+    MoveAfter(I, SExt1);
+
+  WideLoads.emplace(std::make_pair(Loads[0],
+                                   make_unique<WidenedLoad>(Loads, WideLoad)));
+  return WideLoad;
 }
 
-Instruction *ARMParallelDSP::CreateSMLADCall(LoadInst *VecLd0, LoadInst *VecLd1,
+Instruction *ARMParallelDSP::CreateSMLADCall(SmallVectorImpl<LoadInst*> &VecLd0,
+                                             SmallVectorImpl<LoadInst*> &VecLd1,
                                              Instruction *Acc, bool Exchange,
                                              Instruction *InsertAfter) {
   LLVM_DEBUG(dbgs() << "Create SMLAD intrinsic using:\n"
-             << "- " << *VecLd0 << "\n"
-             << "- " << *VecLd1 << "\n"
+             << "- " << *VecLd0[0] << "\n"
+             << "- " << *VecLd0[1] << "\n"
+             << "- " << *VecLd1[0] << "\n"
+             << "- " << *VecLd1[1] << "\n"
              << "- " << *Acc << "\n"
-             << "Exchange: " << Exchange << "\n");
+             << "- Exchange: " << Exchange << "\n");
 
   IRBuilder<NoFolder> Builder(InsertAfter->getParent(),
                               ++BasicBlock::iterator(InsertAfter));
 
   // Replace the reduction chain with an intrinsic call
-  const Type *Ty = IntegerType::get(M->getContext(), 32);
-  LoadInst *NewLd0 = CreateLoadIns(Builder, VecLd0[0], Ty);
-  LoadInst *NewLd1 = CreateLoadIns(Builder, VecLd1[0], Ty);
-  Value* Args[] = { NewLd0, NewLd1, Acc };
+  IntegerType *Ty = IntegerType::get(M->getContext(), 32);
+  LoadInst *WideLd0 = WideLoads.count(VecLd0[0]) ?
+    WideLoads[VecLd0[0]]->getLoad() : CreateLoadIns(Builder, VecLd0, Ty);
+  LoadInst *WideLd1 = WideLoads.count(VecLd1[0]) ?
+    WideLoads[VecLd1[0]]->getLoad() : CreateLoadIns(Builder, VecLd1, Ty);
+  Value* Args[] = { WideLd0, WideLd1, Acc };
   Function *SMLAD = nullptr;
   if (Exchange)
     SMLAD = Acc->getType()->isIntegerTy(32) ?
@@ -731,6 +770,44 @@ Instruction *ARMParallelDSP::CreateSMLADCall(LoadInst *VecLd0, LoadInst *VecLd1,
   CallInst *Call = Builder.CreateCall(SMLAD, Args);
   NumSMLAD++;
   return Call;
+}
+
+// Compare the value lists in Other to this chain.
+bool BinOpChain::AreSymmetrical(BinOpChain *Other) {
+  // Element-by-element comparison of Value lists returning true if they are
+  // instructions with the same opcode or constants with the same value.
+  auto CompareValueList = [](const ValueList &VL0,
+                             const ValueList &VL1) {
+    if (VL0.size() != VL1.size()) {
+      LLVM_DEBUG(dbgs() << "Muls are mismatching operand list lengths: "
+                        << VL0.size() << " != " << VL1.size() << "\n");
+      return false;
+    }
+
+    const unsigned Pairs = VL0.size();
+
+    for (unsigned i = 0; i < Pairs; ++i) {
+      const Value *V0 = VL0[i];
+      const Value *V1 = VL1[i];
+      const auto *Inst0 = dyn_cast<Instruction>(V0);
+      const auto *Inst1 = dyn_cast<Instruction>(V1);
+
+      if (!Inst0 || !Inst1)
+        return false;
+
+      if (Inst0->isSameOperationAs(Inst1))
+        continue;
+
+      const APInt *C0, *C1;
+      if (!(match(V0, m_APInt(C0)) && match(V1, m_APInt(C1)) && C0 == C1))
+        return false;
+    }
+
+    return true;
+  };
+
+  return CompareValueList(LHS, Other->LHS) &&
+         CompareValueList(RHS, Other->RHS);
 }
 
 Pass *llvm::createARMParallelDSPPass() {

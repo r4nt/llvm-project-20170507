@@ -1,9 +1,8 @@
 //===- InstCombineSimplifyDemanded.cpp ------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -366,10 +365,9 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
     KnownBits InputKnown(SrcBitWidth);
     if (SimplifyDemandedBits(I, 0, InputDemandedMask, InputKnown, Depth + 1))
       return I;
-    Known = InputKnown.zextOrTrunc(BitWidth);
-    // Any top bits are known to be zero.
-    if (BitWidth > SrcBitWidth)
-      Known.Zero.setBitsFrom(SrcBitWidth);
+    assert(InputKnown.getBitWidth() == SrcBitWidth && "Src width changed?");
+    Known = InputKnown.zextOrTrunc(BitWidth,
+                                   true /* ExtendedBitsAreKnownZero */);
     assert(!Known.hasConflict() && "Bits known to be one AND zero?");
     break;
   }
@@ -690,6 +688,30 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         // TODO: Could compute known zero/one bits based on the input.
         break;
       }
+      case Intrinsic::fshr:
+      case Intrinsic::fshl: {
+        const APInt *SA;
+        if (!match(I->getOperand(2), m_APInt(SA)))
+          break;
+
+        // Normalize to funnel shift left. APInt shifts of BitWidth are well-
+        // defined, so no need to special-case zero shifts here.
+        uint64_t ShiftAmt = SA->urem(BitWidth);
+        if (II->getIntrinsicID() == Intrinsic::fshr)
+          ShiftAmt = BitWidth - ShiftAmt;
+
+        APInt DemandedMaskLHS(DemandedMask.lshr(ShiftAmt));
+        APInt DemandedMaskRHS(DemandedMask.shl(BitWidth - ShiftAmt));
+        if (SimplifyDemandedBits(I, 0, DemandedMaskLHS, LHSKnown, Depth + 1) ||
+            SimplifyDemandedBits(I, 1, DemandedMaskRHS, RHSKnown, Depth + 1))
+          return I;
+
+        Known.Zero = LHSKnown.Zero.shl(ShiftAmt) |
+                     RHSKnown.Zero.lshr(BitWidth - ShiftAmt);
+        Known.One = LHSKnown.One.shl(ShiftAmt) |
+                    RHSKnown.One.lshr(BitWidth - ShiftAmt);
+        break;
+      }
       case Intrinsic::x86_mmx_pmovmskb:
       case Intrinsic::x86_sse_movmsk_ps:
       case Intrinsic::x86_sse2_movmsk_pd:
@@ -943,6 +965,9 @@ InstCombiner::simplifyShrShlDemandedBits(Instruction *Shr, const APInt &ShrOp1,
 }
 
 /// Implement SimplifyDemandedVectorElts for amdgcn buffer and image intrinsics.
+///
+/// Note: This only supports non-TFE/LWE image intrinsic calls; those have
+///       struct returns.
 Value *InstCombiner::simplifyAMDGCNMemoryIntrinsicDemanded(IntrinsicInst *II,
                                                            APInt DemandedElts,
                                                            int DMaskIdx) {
@@ -957,10 +982,7 @@ Value *InstCombiner::simplifyAMDGCNMemoryIntrinsicDemanded(IntrinsicInst *II,
     // below.
     DemandedElts = (1 << DemandedElts.getActiveBits()) - 1;
   } else {
-    ConstantInt *DMask = dyn_cast<ConstantInt>(II->getArgOperand(DMaskIdx));
-    if (!DMask)
-      return nullptr; // non-constant dmask is not supported by codegen
-
+    ConstantInt *DMask = cast<ConstantInt>(II->getArgOperand(DMaskIdx));
     unsigned DMaskVal = DMask->getZExtValue() & 0xf;
 
     // Mask off values that are undefined because the dmask doesn't cover them
@@ -1147,6 +1169,27 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
   switch (I->getOpcode()) {
   default: break;
 
+  case Instruction::GetElementPtr: {
+    // Conservatively track the demanded elements back through any vector
+    // operands we may have.  We know there must be at least one, or we
+    // wouldn't have a vector result to get here. Note that we intentionally
+    // merge the undef bits here since gepping with either an undef base or
+    // index results in undef. 
+    for (unsigned i = 0; i < I->getNumOperands(); i++) {
+      if (isa<UndefValue>(I->getOperand(i))) {
+        // If the entire vector is undefined, just return this info.
+        UndefElts = EltMask;
+        return nullptr;
+      }
+      if (I->getOperand(i)->getType()->isVectorTy()) {
+        APInt UndefEltsOp(VWidth, 0);
+        simplifyAndSetOp(I, i, DemandedElts, UndefEltsOp);
+        UndefElts |= UndefEltsOp;
+      }
+    }
+
+    break;
+  }
   case Instruction::InsertElement: {
     // If this is a variable index, we don't know which element it overwrites.
     // demand exactly the same input as we produce.
@@ -1595,6 +1638,10 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
       break;
     case Intrinsic::amdgcn_buffer_load:
     case Intrinsic::amdgcn_buffer_load_format:
+    case Intrinsic::amdgcn_raw_buffer_load:
+    case Intrinsic::amdgcn_raw_buffer_load_format:
+    case Intrinsic::amdgcn_struct_buffer_load:
+    case Intrinsic::amdgcn_struct_buffer_load_format:
       return simplifyAMDGCNMemoryIntrinsicDemanded(II, DemandedElts);
     default: {
       if (getAMDGPUImageDMaskIntrinsic(II->getIntrinsicID()))
@@ -1624,6 +1671,11 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
     // like undef & 0. The result is known zero, not undef.
     UndefElts &= UndefElts2;
   }
+
+  // If we've proven all of the lanes undef, return an undef value.
+  // TODO: Intersect w/demanded lanes
+  if (UndefElts.isAllOnesValue())
+    return UndefValue::get(I->getType());;
 
   return MadeChange ? I : nullptr;
 }

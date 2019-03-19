@@ -1,9 +1,8 @@
 //===- InputSection.cpp ---------------------------------------------------===//
 //
-//                             The LLVM Linker
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -77,7 +76,7 @@ InputSectionBase::InputSectionBase(InputFile *File, uint64_t Flags,
   // no alignment constraits.
   uint32_t V = std::max<uint64_t>(Alignment, 1);
   if (!isPowerOf2_64(V))
-    fatal(toString(File) + ": section sh_addralign is not a power of 2");
+    fatal(toString(this) + ": sh_addralign is not a power of 2");
   this->Alignment = V;
 
   // In ELF, each section can be compressed by zlib, and if compressed,
@@ -145,13 +144,18 @@ size_t InputSectionBase::getSize() const {
 
 void InputSectionBase::uncompress() const {
   size_t Size = UncompressedSize;
-  UncompressedBuf.reset(new char[Size]);
+  char *UncompressedBuf;
+  {
+    static std::mutex Mu;
+    std::lock_guard<std::mutex> Lock(Mu);
+    UncompressedBuf = BAlloc.Allocate<char>(Size);
+  }
 
-  if (Error E =
-          zlib::uncompress(toStringRef(RawData), UncompressedBuf.get(), Size))
+  if (Error E = zlib::uncompress(toStringRef(RawData), UncompressedBuf, Size))
     fatal(toString(this) +
           ": uncompress failed: " + llvm::toString(std::move(E)));
-  RawData = makeArrayRef((uint8_t *)UncompressedBuf.get(), Size);
+  RawData = makeArrayRef((uint8_t *)UncompressedBuf, Size);
+  UncompressedSize = -1;
 }
 
 uint64_t InputSectionBase::getOffsetInFile() const {
@@ -288,14 +292,17 @@ Defined *InputSectionBase::getEnclosingFunction(uint64_t Offset) {
 // Returns a source location string. Used to construct an error message.
 template <class ELFT>
 std::string InputSectionBase::getLocation(uint64_t Offset) {
+  std::string SecAndOffset = (Name + "+0x" + utohexstr(Offset)).str();
+
   // We don't have file for synthetic sections.
   if (getFile<ELFT>() == nullptr)
-    return (Config->OutputFile + ":(" + Name + "+0x" + utohexstr(Offset) + ")")
+    return (Config->OutputFile + ":(" + SecAndOffset + ")")
         .str();
 
   // First check if we can get desired values from debugging information.
   if (Optional<DILineInfo> Info = getFile<ELFT>()->getDILineInfo(this, Offset))
-    return Info->FileName + ":" + std::to_string(Info->Line);
+    return Info->FileName + ":" + std::to_string(Info->Line) + ":(" +
+           SecAndOffset + ")";
 
   // File->SourceFile contains STT_FILE symbol that contains a
   // source file name. If it's missing, we use an object file name.
@@ -304,10 +311,10 @@ std::string InputSectionBase::getLocation(uint64_t Offset) {
     SrcFile = toString(File);
 
   if (Defined *D = getEnclosingFunction<ELFT>(Offset))
-    return SrcFile + ":(function " + toString(*D) + ")";
+    return SrcFile + ":(function " + toString(*D) + ": " + SecAndOffset + ")";
 
   // If there's no symbol, print out the offset in the section.
-  return (SrcFile + ":(" + Name + "+0x" + utohexstr(Offset) + ")").str();
+  return (SrcFile + ":(" + SecAndOffset + ")");
 }
 
 // This function is intended to be used for constructing an error message.
@@ -545,7 +552,7 @@ static uint64_t getARMStaticBase(const Symbol &Sym) {
 //
 // This function returns the R_RISCV_PCREL_HI20 relocation from
 // R_RISCV_PCREL_LO12's symbol and addend.
-Relocation *lld::elf::getRISCVPCRelHi20(const Symbol *Sym, uint64_t Addend) {
+static Relocation *getRISCVPCRelHi20(const Symbol *Sym, uint64_t Addend) {
   const Defined *D = cast<Defined>(Sym);
   InputSection *IS = cast<InputSection>(D->Section);
 
@@ -555,10 +562,16 @@ Relocation *lld::elf::getRISCVPCRelHi20(const Symbol *Sym, uint64_t Addend) {
 
   // Relocations are sorted by offset, so we can use std::equal_range to do
   // binary search.
-  auto Range = std::equal_range(IS->Relocations.begin(), IS->Relocations.end(),
-                                D->Value, RelocationOffsetComparator{});
-  for (auto It = std::get<0>(Range); It != std::get<1>(Range); ++It)
-    if (isRelExprOneOf<R_PC>(It->Expr))
+  Relocation R;
+  R.Offset = D->Value;
+  auto Range =
+      std::equal_range(IS->Relocations.begin(), IS->Relocations.end(), R,
+                       [](const Relocation &LHS, const Relocation &RHS) {
+                         return LHS.Offset < RHS.Offset;
+                       });
+
+  for (auto It = Range.first; It != Range.second; ++It)
+    if (It->Expr == R_PC)
       return &*It;
 
   error("R_RISCV_PCREL_LO12 relocation points to " + IS->getObjMsg(D->Value) +
@@ -575,6 +588,10 @@ static int64_t getTlsTpOffset() {
     // Variant 1. The thread pointer points to a TCB with a fixed 2-word size,
     // followed by a variable amount of alignment padding, followed by the TLS
     // segment.
+    //
+    // NB: While the ARM/AArch64 ABI formally has a 2-word TCB size, lld
+    // effectively increases the TCB size to 8 words for Android compatibility.
+    // It accomplishes this by increasing the segment's alignment.
     return alignTo(Config->Wordsize * 2, Out::TlsPhdr->p_align);
   case EM_386:
   case EM_X86_64:
@@ -594,8 +611,6 @@ static int64_t getTlsTpOffset() {
 static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
                                  uint64_t P, const Symbol &Sym, RelExpr Expr) {
   switch (Expr) {
-  case R_INVALID:
-    return 0;
   case R_ABS:
   case R_RELAX_TLS_LD_TO_LE_ABS:
   case R_RELAX_GOT_PC_NOPIC:
@@ -622,8 +637,8 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
   case R_GOT_OFF:
   case R_RELAX_TLS_GD_TO_IE_GOT_OFF:
     return Sym.getGotOffset() + A;
-  case R_GOT_PAGE_PC:
-  case R_RELAX_TLS_GD_TO_IE_PAGE_PC:
+  case R_AARCH64_GOT_PAGE_PC:
+  case R_AARCH64_RELAX_TLS_GD_TO_IE_PAGE_PC:
     return getAArch64Page(Sym.getGotVA() + A) - getAArch64Page(P);
   case R_GOT_PC:
   case R_RELAX_TLS_GD_TO_IE:
@@ -668,21 +683,15 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
   case R_MIPS_TLSLD:
     return In.MipsGot->getVA() + In.MipsGot->getTlsIndexOffset(File) -
            In.MipsGot->getGp(File);
-  case R_PAGE_PC:
-  case R_PLT_PAGE_PC: {
-    uint64_t Dest;
-    if (Sym.isUndefWeak())
-      Dest = getAArch64Page(A);
-    else
-      Dest = getAArch64Page(Sym.getVA(A));
-    return Dest - getAArch64Page(P);
+  case R_AARCH64_PAGE_PC: {
+    uint64_t Val = Sym.isUndefWeak() ? P + A : Sym.getVA(A);
+    return getAArch64Page(Val) - getAArch64Page(P);
   }
   case R_RISCV_PC_INDIRECT: {
-    const Relocation *HiRel = getRISCVPCRelHi20(&Sym, A);
-    if (!HiRel)
-      return 0;
-    return getRelocTargetVA(File, HiRel->Type, HiRel->Addend, Sym.getVA(),
-                            *HiRel->Sym, HiRel->Expr);
+    if (const Relocation *HiRel = getRISCVPCRelHi20(&Sym, A))
+      return getRelocTargetVA(File, HiRel->Type, HiRel->Addend, Sym.getVA(),
+                              *HiRel->Sym, HiRel->Expr);
+    return 0;
   }
   case R_PC: {
     uint64_t Dest;
@@ -744,7 +753,7 @@ static uint64_t getRelocTargetVA(const InputFile *File, RelType Type, int64_t A,
     return Sym.getSize() + A;
   case R_TLSDESC:
     return In.Got->getGlobalDynAddr(Sym) + A;
-  case R_TLSDESC_PAGE:
+  case R_AARCH64_TLSDESC_PAGE:
     return getAArch64Page(In.Got->getGlobalDynAddr(Sym) + A) -
            getAArch64Page(P);
   case R_TLSGD_GOT:
@@ -894,10 +903,10 @@ void InputSectionBase::relocateAlloc(uint8_t *Buf, uint8_t *BufEnd) {
     case R_RELAX_TLS_GD_TO_LE_NEG:
       Target->relaxTlsGdToLe(BufLoc, Type, TargetVA);
       break;
+    case R_AARCH64_RELAX_TLS_GD_TO_IE_PAGE_PC:
     case R_RELAX_TLS_GD_TO_IE:
     case R_RELAX_TLS_GD_TO_IE_ABS:
     case R_RELAX_TLS_GD_TO_IE_GOT_OFF:
-    case R_RELAX_TLS_GD_TO_IE_PAGE_PC:
     case R_RELAX_TLS_GD_TO_IE_END:
       Target->relaxTlsGdToIe(BufLoc, Type, TargetVA);
       break;
@@ -1058,7 +1067,7 @@ template <class ELFT> void InputSection::writeTo(uint8_t *Buf) {
 
   // If this is a compressed section, uncompress section contents directly
   // to the buffer.
-  if (UncompressedSize >= 0 && !UncompressedBuf) {
+  if (UncompressedSize >= 0) {
     size_t Size = UncompressedSize;
     if (Error E = zlib::uncompress(toStringRef(RawData),
                                    (char *)(Buf + OutSecOff), Size))
@@ -1206,41 +1215,19 @@ void MergeInputSection::splitIntoPieces() {
     splitStrings(data(), Entsize);
   else
     splitNonStrings(data(), Entsize);
-
-  OffsetMap.reserve(Pieces.size());
-  for (size_t I = 0, E = Pieces.size(); I != E; ++I)
-    OffsetMap[Pieces[I].InputOff] = I;
-}
-
-template <class It, class T, class Compare>
-static It fastUpperBound(It First, It Last, const T &Value, Compare Comp) {
-  size_t Size = std::distance(First, Last);
-  assert(Size != 0);
-  while (Size != 1) {
-    size_t H = Size / 2;
-    const It MI = First + H;
-    Size -= H;
-    First = Comp(Value, *MI) ? First : First + H;
-  }
-  return Comp(Value, *First) ? First : First + 1;
 }
 
 SectionPiece *MergeInputSection::getSectionPiece(uint64_t Offset) {
   if (this->data().size() <= Offset)
     fatal(toString(this) + ": offset is outside the section");
 
-  // Find a piece starting at a given offset.
-  auto It = OffsetMap.find(Offset);
-  if (It != OffsetMap.end())
-    return &Pieces[It->second];
-
   // If Offset is not at beginning of a section piece, it is not in the map.
   // In that case we need to  do a binary search of the original section piece vector.
-  auto I = fastUpperBound(
-      Pieces.begin(), Pieces.end(), Offset,
-      [](const uint64_t &A, const SectionPiece &B) { return A < B.InputOff; });
-  --I;
-  return &*I;
+  auto It2 =
+      llvm::upper_bound(Pieces, Offset, [](uint64_t Offset, SectionPiece P) {
+        return Offset < P.InputOff;
+      });
+  return &It2[-1];
 }
 
 // Returns the offset in an output section for a given input offset.

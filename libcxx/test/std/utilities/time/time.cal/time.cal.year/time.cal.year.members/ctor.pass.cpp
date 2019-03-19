@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -24,23 +23,25 @@
 
 #include "test_macros.h"
 
-int main()
+int main(int, char**)
 {
     using year = std::chrono::year;
 
     ASSERT_NOEXCEPT(year{});
     ASSERT_NOEXCEPT(year(0U));
     ASSERT_NOEXCEPT(static_cast<int>(year(0U)));
-    
+
     constexpr year y0{};
     static_assert(static_cast<int>(y0) == 0, "");
 
     constexpr year y1{1};
     static_assert(static_cast<int>(y1) == 1, "");
-    
+
     for (int i = 0; i <= 2550; i += 7)
     {
         year year(i);
         assert(static_cast<int>(year) == i);
     }
+
+  return 0;
 }

@@ -1,9 +1,8 @@
 //===- llvm/Support/Error.h - Recoverable error handling --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -953,10 +952,14 @@ Expected<T> handleExpected(Expected<T> ValOrErr, RecoveryFtor &&RecoveryPath,
 /// will be printed before the first one is logged. A newline will be printed
 /// after each error.
 ///
+/// This function is compatible with the helpers from Support/WithColor.h. You
+/// can pass any of them as the OS. Please consider using them instead of
+/// including 'error: ' in the ErrorBanner.
+///
 /// This is useful in the base level of your program to allow clean termination
 /// (allowing clean deallocation of resources, etc.), while reporting error
 /// information to the user.
-void logAllUnhandledErrors(Error E, raw_ostream &OS, Twine ErrorBanner);
+void logAllUnhandledErrors(Error E, raw_ostream &OS, Twine ErrorBanner = {});
 
 /// Write all error messages (if any) in E to a string. The newline character
 /// is used to separate error messages.
@@ -1061,6 +1064,8 @@ private:
 /// std::error_codes.
 class ECError : public ErrorInfo<ECError> {
   friend Error errorCodeToError(std::error_code);
+
+  virtual void anchor() override;
 
 public:
   void setErrorCode(std::error_code EC) { this->EC = EC; }
@@ -1171,7 +1176,7 @@ Error createStringError(std::error_code EC, char const *Msg);
 /// show more detailed information to the user.
 class FileError final : public ErrorInfo<FileError> {
 
-  friend Error createFileError(std::string, Error);
+  friend Error createFileError(const Twine &, Error);
 
 public:
   void log(raw_ostream &OS) const override {
@@ -1188,15 +1193,15 @@ public:
   static char ID;
 
 private:
-  FileError(std::string F, std::unique_ptr<ErrorInfoBase> E) {
+  FileError(const Twine &F, std::unique_ptr<ErrorInfoBase> E) {
     assert(E && "Cannot create FileError from Error success value.");
-    assert(!F.empty() &&
+    assert(!F.isTriviallyEmpty() &&
            "The file name provided to FileError must not be empty.");
-    FileName = F;
+    FileName = F.str();
     Err = std::move(E);
   }
 
-  static Error build(std::string F, Error E) {
+  static Error build(const Twine &F, Error E) {
     return Error(std::unique_ptr<FileError>(new FileError(F, E.takePayload())));
   }
 
@@ -1206,11 +1211,17 @@ private:
 
 /// Concatenate a source file path and/or name with an Error. The resulting
 /// Error is unchecked.
-inline Error createFileError(std::string F, Error E) {
+inline Error createFileError(const Twine &F, Error E) {
   return FileError::build(F, std::move(E));
 }
 
-Error createFileError(std::string F, ErrorSuccess) = delete;
+/// Concatenate a source file path and/or name with a std::error_code 
+/// to form an Error object.
+inline Error createFileError(const Twine &F, std::error_code EC) {
+  return createFileError(F, errorCodeToError(EC));
+}
+
+Error createFileError(const Twine &F, ErrorSuccess) = delete;
 
 /// Helper for check-and-exit error handling.
 ///

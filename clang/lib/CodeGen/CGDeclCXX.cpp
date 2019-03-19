@@ -1,9 +1,8 @@
 //===--- CGDeclCXX.cpp - Emit LLVM Code for C++ declarations --------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,7 +14,7 @@
 #include "CGCXXABI.h"
 #include "CGObjCRuntime.h"
 #include "CGOpenMPRuntime.h"
-#include "clang/Frontend/CodeGenOptions.h"
+#include "clang/Basic/CodeGenOptions.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MDBuilder.h"
@@ -26,7 +25,10 @@ using namespace CodeGen;
 
 static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
                          ConstantAddress DeclPtr) {
-  assert(D.hasGlobalStorage() && "VarDecl must have global storage!");
+  assert(
+      (D.hasGlobalStorage() ||
+       (D.hasLocalStorage() && CGF.getContext().getLangOpts().OpenCLCPlusPlus)) &&
+      "VarDecl must have global or local (in the case of OpenCL) storage!");
   assert(!D.getType()->isReferenceType() &&
          "Should not call EmitDeclInit on a reference!");
 
@@ -63,15 +65,24 @@ static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
 /// Emit code to cause the destruction of the given variable with
 /// static storage duration.
 static void EmitDeclDestroy(CodeGenFunction &CGF, const VarDecl &D,
-                            ConstantAddress addr) {
+                            ConstantAddress Addr) {
+  // Honor __attribute__((no_destroy)) and bail instead of attempting
+  // to emit a reference to a possibly nonexistent destructor, which
+  // in turn can cause a crash. This will result in a global constructor
+  // that isn't balanced out by a destructor call as intended by the
+  // attribute. This also checks for -fno-c++-static-destructors and
+  // bails even if the attribute is not present.
+  if (D.isNoDestroy(CGF.getContext()))
+    return;
+  
   CodeGenModule &CGM = CGF.CGM;
 
   // FIXME:  __attribute__((cleanup)) ?
 
-  QualType type = D.getType();
-  QualType::DestructionKind dtorKind = type.isDestructedType();
+  QualType Type = D.getType();
+  QualType::DestructionKind DtorKind = Type.isDestructedType();
 
-  switch (dtorKind) {
+  switch (DtorKind) {
   case QualType::DK_none:
     return;
 
@@ -86,13 +97,14 @@ static void EmitDeclDestroy(CodeGenFunction &CGF, const VarDecl &D,
     return;
   }
 
-  llvm::Constant *function;
-  llvm::Constant *argument;
+  llvm::FunctionCallee Func;
+  llvm::Constant *Argument;
 
   // Special-case non-array C++ destructors, if they have the right signature.
   // Under some ABIs, destructors return this instead of void, and cannot be
-  // passed directly to __cxa_atexit if the target does not allow this mismatch.
-  const CXXRecordDecl *Record = type->getAsCXXRecordDecl();
+  // passed directly to __cxa_atexit if the target does not allow this
+  // mismatch.
+  const CXXRecordDecl *Record = Type->getAsCXXRecordDecl();
   bool CanRegisterDestructor =
       Record && (!CGM.getCXXABI().HasThisReturn(
                      GlobalDecl(Record->getDestructor(), Dtor_Complete)) ||
@@ -103,21 +115,21 @@ static void EmitDeclDestroy(CodeGenFunction &CGF, const VarDecl &D,
   bool UsingExternalHelper = !CGM.getCodeGenOpts().CXAAtExit;
   if (Record && (CanRegisterDestructor || UsingExternalHelper)) {
     assert(!Record->hasTrivialDestructor());
-    CXXDestructorDecl *dtor = Record->getDestructor();
+    CXXDestructorDecl *Dtor = Record->getDestructor();
 
-    function = CGM.getAddrOfCXXStructor(dtor, StructorType::Complete);
-    argument = llvm::ConstantExpr::getBitCast(
-        addr.getPointer(), CGF.getTypes().ConvertType(type)->getPointerTo());
+    Func = CGM.getAddrAndTypeOfCXXStructor(Dtor, StructorType::Complete);
+    Argument = llvm::ConstantExpr::getBitCast(
+        Addr.getPointer(), CGF.getTypes().ConvertType(Type)->getPointerTo());
 
   // Otherwise, the standard logic requires a helper function.
   } else {
-    function = CodeGenFunction(CGM)
-        .generateDestroyHelper(addr, type, CGF.getDestroyer(dtorKind),
-                               CGF.needsEHCleanup(dtorKind), &D);
-    argument = llvm::Constant::getNullValue(CGF.Int8PtrTy);
+    Func = CodeGenFunction(CGM)
+           .generateDestroyHelper(Addr, Type, CGF.getDestroyer(DtorKind),
+                                  CGF.needsEHCleanup(DtorKind), &D);
+    Argument = llvm::Constant::getNullValue(CGF.Int8PtrTy);
   }
 
-  CGM.getCXXABI().registerGlobalDtor(CGF, D, function, argument);
+  CGM.getCXXABI().registerGlobalDtor(CGF, D, Func, Argument);
 }
 
 /// Emit code to cause the variable at the given address to be considered as
@@ -137,7 +149,7 @@ void CodeGenFunction::EmitInvariantStart(llvm::Constant *Addr, CharUnits Size) {
   llvm::Intrinsic::ID InvStartID = llvm::Intrinsic::invariant_start;
   // Overloaded address space type.
   llvm::Type *ObjectPtr[1] = {Int8PtrTy};
-  llvm::Constant *InvariantStart = CGM.getIntrinsic(InvStartID, ObjectPtr);
+  llvm::Function *InvariantStart = CGM.getIntrinsic(InvStartID, ObjectPtr);
 
   // Emit a call with the size in bytes of the object.
   uint64_t Width = Size.getQuantity();
@@ -202,8 +214,8 @@ void CodeGenFunction::EmitCXXGlobalVarDeclInit(const VarDecl &D,
 
 /// Create a stub function, suitable for being passed to atexit,
 /// which passes the given address to the given destructor function.
-llvm::Constant *CodeGenFunction::createAtExitStub(const VarDecl &VD,
-                                                  llvm::Constant *dtor,
+llvm::Function *CodeGenFunction::createAtExitStub(const VarDecl &VD,
+                                                  llvm::FunctionCallee dtor,
                                                   llvm::Constant *addr) {
   // Get the destructor function type, void(*)(void).
   llvm::FunctionType *ty = llvm::FunctionType::get(CGM.VoidTy, false);
@@ -226,7 +238,7 @@ llvm::Constant *CodeGenFunction::createAtExitStub(const VarDecl &VD,
 
  // Make sure the call and the callee agree on calling convention.
   if (llvm::Function *dtorFn =
-        dyn_cast<llvm::Function>(dtor->stripPointerCasts()))
+          dyn_cast<llvm::Function>(dtor.getCallee()->stripPointerCasts()))
     call->setCallingConv(dtorFn->getCallingConv());
 
   CGF.FinishFunction();
@@ -236,7 +248,7 @@ llvm::Constant *CodeGenFunction::createAtExitStub(const VarDecl &VD,
 
 /// Register a global destructor using the C atexit runtime function.
 void CodeGenFunction::registerGlobalDtorWithAtExit(const VarDecl &VD,
-                                                   llvm::Constant *dtor,
+                                                   llvm::FunctionCallee dtor,
                                                    llvm::Constant *addr) {
   // Create a function which calls the destructor.
   llvm::Constant *dtorStub = createAtExitStub(VD, dtor, addr);
@@ -248,10 +260,10 @@ void CodeGenFunction::registerGlobalDtorWithAtExit(llvm::Constant *dtorStub) {
   llvm::FunctionType *atexitTy =
     llvm::FunctionType::get(IntTy, dtorStub->getType(), false);
 
-  llvm::Constant *atexit =
+  llvm::FunctionCallee atexit =
       CGM.CreateRuntimeFunction(atexitTy, "atexit", llvm::AttributeList(),
                                 /*Local=*/true);
-  if (llvm::Function *atexitFn = dyn_cast<llvm::Function>(atexit))
+  if (llvm::Function *atexitFn = dyn_cast<llvm::Function>(atexit.getCallee()))
     atexitFn->setDoesNotThrow();
 
   EmitNounwindRuntimeCall(atexit, dtorStub);
@@ -669,8 +681,8 @@ CodeGenFunction::GenerateCXXGlobalInitFunc(llvm::Function *Fn,
 
 void CodeGenFunction::GenerateCXXGlobalDtorsFunc(
     llvm::Function *Fn,
-    const std::vector<std::pair<llvm::WeakTrackingVH, llvm::Constant *>>
-        &DtorsAndObjects) {
+    const std::vector<std::tuple<llvm::FunctionType *, llvm::WeakTrackingVH,
+                                 llvm::Constant *>> &DtorsAndObjects) {
   {
     auto NL = ApplyDebugLocation::CreateEmpty(*this);
     StartFunction(GlobalDecl(), getContext().VoidTy, Fn,
@@ -680,9 +692,11 @@ void CodeGenFunction::GenerateCXXGlobalDtorsFunc(
 
     // Emit the dtors, in reverse order from construction.
     for (unsigned i = 0, e = DtorsAndObjects.size(); i != e; ++i) {
-      llvm::Value *Callee = DtorsAndObjects[e - i - 1].first;
-      llvm::CallInst *CI = Builder.CreateCall(Callee,
-                                          DtorsAndObjects[e - i - 1].second);
+      llvm::FunctionType *CalleeTy;
+      llvm::Value *Callee;
+      llvm::Constant *Arg;
+      std::tie(CalleeTy, Callee, Arg) = DtorsAndObjects[e - i - 1];
+      llvm::CallInst *CI = Builder.CreateCall(CalleeTy, Callee, Arg);
       // Make sure the call and the callee agree on calling convention.
       if (llvm::Function *F = dyn_cast<llvm::Function>(Callee))
         CI->setCallingConv(F->getCallingConv());

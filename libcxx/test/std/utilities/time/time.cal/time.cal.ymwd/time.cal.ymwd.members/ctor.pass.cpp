@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -31,11 +30,10 @@
 
 #include "test_macros.h"
 
-int main()
+int main(int, char**)
 {
     using year               = std::chrono::year;
     using month              = std::chrono::month;
-    using day                = std::chrono::day;
     using weekday            = std::chrono::weekday;
     using weekday_indexed    = std::chrono::weekday_indexed;
     using year_month_weekday = std::chrono::year_month_weekday;
@@ -45,7 +43,7 @@ int main()
 
     ASSERT_NOEXCEPT(year_month_weekday{});
     ASSERT_NOEXCEPT(year_month_weekday{year{1}, month{1}, weekday_indexed{Tuesday, 1}});
-    
+
     constexpr year_month_weekday ym0{};
     static_assert( ym0.year()            == year{},            "");
     static_assert( ym0.month()           == month{},           "");
@@ -62,4 +60,6 @@ int main()
     static_assert( ym1.weekday_indexed() == weekday_indexed{Tuesday, 1}, "");
     static_assert( ym1.ok(),                                             "");
 
+
+  return 0;
 }

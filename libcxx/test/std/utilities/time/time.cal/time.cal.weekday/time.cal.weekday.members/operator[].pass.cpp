@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -13,8 +12,8 @@
 
 //   constexpr weekday_indexed operator[](unsigned index) const noexcept;
 //   constexpr weekday_last    operator[](last_spec)      const noexcept;
-  
-  
+
+
 #include <chrono>
 #include <type_traits>
 #include <cassert>
@@ -22,7 +21,7 @@
 #include "test_macros.h"
 #include "../../euclidian.h"
 
-int main()
+int main(int, char**)
 {
     using weekday         = std::chrono::weekday;
     using weekday_last    = std::chrono::weekday_last;
@@ -35,7 +34,7 @@ int main()
 
     ASSERT_NOEXCEPT(                           std::declval<weekday>()[std::chrono::last]);
     ASSERT_SAME_TYPE(weekday_last,    decltype(std::declval<weekday>()[std::chrono::last]));
-    
+
     static_assert(Sunday[2].weekday() == Sunday, "");
     static_assert(Sunday[2].index  () == 2, "");
 
@@ -56,4 +55,6 @@ int main()
         assert(wdi.index() == j);
         assert(wdi.ok());
     }
+
+  return 0;
 }

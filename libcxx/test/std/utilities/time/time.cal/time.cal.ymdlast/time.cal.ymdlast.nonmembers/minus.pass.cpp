@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -13,12 +12,12 @@
 
 // constexpr year_month_day_last
 //   operator-(const year_month_day_last& ymdl, const months& dm) noexcept;
-// 
+//
 //   Returns: ymdl + (-dm).
 //
 // constexpr year_month_day_last
 //   operator-(const year_month_day_last& ymdl, const years& dy) noexcept;
-// 
+//
 //   Returns: ymdl + (-dy).
 
 
@@ -48,11 +47,10 @@ constexpr bool testConstexprMonths (std::chrono::year_month_day_last ymdl)
         ;
 }
 
-int main()
+int main(int, char**)
 {
     using year                = std::chrono::year;
     using month               = std::chrono::month;
-    using day                 = std::chrono::day;
     using month_day_last      = std::chrono::month_day_last;
     using year_month_day_last = std::chrono::year_month_day_last;
     using months              = std::chrono::months;
@@ -89,4 +87,6 @@ int main()
     }
     }
 
+
+  return 0;
 }

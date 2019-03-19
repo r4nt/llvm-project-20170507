@@ -1,10 +1,9 @@
 //===-- PlatformDarwinKernel.cpp -----------------------------------*- C++
 //-*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -13,10 +12,6 @@
 #if defined(__APPLE__) // This Plugin uses the Mac-specific
                        // source/Host/macosx/cfcpp utilities
 
-// C Includes
-// C++ Includes
-// Other libraries and framework includes
-// Project includes
 #include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/ModuleList.h"
@@ -39,6 +34,8 @@
 #include "llvm/Support/FileSystem.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+
+#include <memory>
 
 #include "Host/macosx/cfcpp/CFCBundle.h"
 
@@ -95,7 +92,7 @@ PlatformSP PlatformDarwinKernel::CreateInstance(bool force,
   // ArchSpec for normal userland debugging.  It is only useful in kernel debug
   // sessions and the DynamicLoaderDarwinPlugin (or a user doing 'platform
   // select') will force the creation of this Platform plugin.
-  if (force == false) {
+  if (!force) {
     if (log)
       log->Printf("PlatformDarwinKernel::%s() aborting creation of platform "
                   "because force == false",
@@ -106,7 +103,7 @@ PlatformSP PlatformDarwinKernel::CreateInstance(bool force,
   bool create = force;
   LazyBool is_ios_debug_session = eLazyBoolCalculate;
 
-  if (create == false && arch && arch->IsValid()) {
+  if (!create && arch && arch->IsValid()) {
     const llvm::Triple &triple = arch->GetTriple();
     switch (triple.getVendor()) {
     case llvm::Triple::Apple:
@@ -115,7 +112,7 @@ PlatformSP PlatformDarwinKernel::CreateInstance(bool force,
 
     // Only accept "unknown" for vendor if the host is Apple and it "unknown"
     // wasn't specified (it was just returned because it was NOT specified)
-    case llvm::Triple::UnknownArch:
+    case llvm::Triple::UnknownVendor:
       create = !arch->TripleVendorWasSpecified();
       break;
     default:
@@ -205,7 +202,7 @@ public:
   }
 
   PlatformDarwinKernelProperties() : Properties() {
-    m_collection_sp.reset(new OptionValueProperties(GetSettingName()));
+    m_collection_sp = std::make_shared<OptionValueProperties>(GetSettingName());
     m_collection_sp->Initialize(g_properties);
   }
 
@@ -233,7 +230,7 @@ typedef std::shared_ptr<PlatformDarwinKernelProperties>
 static const PlatformDarwinKernelPropertiesSP &GetGlobalProperties() {
   static PlatformDarwinKernelPropertiesSP g_settings_sp;
   if (!g_settings_sp)
-    g_settings_sp.reset(new PlatformDarwinKernelProperties());
+    g_settings_sp = std::make_shared<PlatformDarwinKernelProperties>();
   return g_settings_sp;
 }
 
@@ -379,7 +376,7 @@ void PlatformDarwinKernel::CollectKextAndKernelDirectories() {
   // Add simple directory /Applications/Xcode.app/Contents/Developer/../Symbols
   FileSpec possible_dir(developer_dir + "/../Symbols");
   FileSystem::Instance().Resolve(possible_dir);
-  if (llvm::sys::fs::is_directory(possible_dir.GetPath()))
+  if (FileSystem::Instance().IsDirectory(possible_dir))
     m_search_directories.push_back(possible_dir);
 
   // Add simple directory of the current working directory
@@ -396,7 +393,7 @@ void PlatformDarwinKernel::GetUserSpecifiedDirectoriesToSearch() {
   for (uint32_t i = 0; i < user_dirs_count; i++) {
     FileSpec dir = user_dirs.GetFileSpecAtIndex(i);
     FileSystem::Instance().Resolve(dir);
-    if (llvm::sys::fs::is_directory(dir.GetPath())) {
+    if (FileSystem::Instance().IsDirectory(dir)) {
       m_search_directories.push_back(dir);
     }
   }
@@ -413,7 +410,7 @@ void PlatformDarwinKernel::AddRootSubdirsToSearchPaths(
   for (int i = 0; subdirs[i] != nullptr; i++) {
     FileSpec testdir(dir + subdirs[i]);
     FileSystem::Instance().Resolve(testdir);
-    if (llvm::sys::fs::is_directory(testdir.GetPath()))
+    if (FileSystem::Instance().IsDirectory(testdir))
       thisp->m_search_directories.push_back(testdir);
   }
 
@@ -542,11 +539,11 @@ PlatformDarwinKernel::GetKernelsAndKextsInDirectoryHelper(
     // Look to see if there is a PlugIns subdir with more kexts
     FileSpec contents_plugins(file_spec.GetPath() + "/Contents/PlugIns");
     std::string search_here_too;
-    if (llvm::sys::fs::is_directory(contents_plugins.GetPath())) {
+    if (FileSystem::Instance().IsDirectory(contents_plugins)) {
       search_here_too = contents_plugins.GetPath();
     } else {
       FileSpec plugins(file_spec.GetPath() + "/PlugIns");
-      if (llvm::sys::fs::is_directory(plugins.GetPath())) {
+      if (FileSystem::Instance().IsDirectory(plugins)) {
         search_here_too = plugins.GetPath();
       }
     }
@@ -618,7 +615,7 @@ bool PlatformDarwinKernel::KextHasdSYMSibling(
   std::string filename = dsym_fspec.GetFilename().AsCString();
   filename += ".dSYM";
   dsym_fspec.GetFilename() = ConstString(filename);
-  if (llvm::sys::fs::is_directory(dsym_fspec.GetPath())) {
+  if (FileSystem::Instance().IsDirectory(dsym_fspec)) {
     return true;
   }
   // Should probably get the CFBundleExecutable here or call
@@ -633,7 +630,7 @@ bool PlatformDarwinKernel::KextHasdSYMSibling(
   deep_bundle_str += ".dSYM";
   dsym_fspec.SetFile(deep_bundle_str, FileSpec::Style::native);
   FileSystem::Instance().Resolve(dsym_fspec);
-  if (llvm::sys::fs::is_directory(dsym_fspec.GetPath())) {
+  if (FileSystem::Instance().IsDirectory(dsym_fspec)) {
     return true;
   }
 
@@ -644,10 +641,7 @@ bool PlatformDarwinKernel::KextHasdSYMSibling(
   shallow_bundle_str += ".dSYM";
   dsym_fspec.SetFile(shallow_bundle_str, FileSpec::Style::native);
   FileSystem::Instance().Resolve(dsym_fspec);
-  if (llvm::sys::fs::is_directory(dsym_fspec.GetPath())) {
-    return true;
-  }
-  return false;
+  return FileSystem::Instance().IsDirectory(dsym_fspec);
 }
 
 // Given a FileSpec of /dir/dir/mach.development.t7004 Return true if a dSYM
@@ -658,10 +652,7 @@ bool PlatformDarwinKernel::KernelHasdSYMSibling(const FileSpec &kernel_binary) {
   std::string filename = kernel_binary.GetFilename().AsCString();
   filename += ".dSYM";
   kernel_dsym.GetFilename() = ConstString(filename);
-  if (llvm::sys::fs::is_directory(kernel_dsym.GetPath())) {
-    return true;
-  }
-  return false;
+  return FileSystem::Instance().IsDirectory(kernel_dsym);
 }
 
 Status PlatformDarwinKernel::GetSharedModule(
@@ -720,8 +711,7 @@ Status PlatformDarwinKernel::GetSharedModule(
     }
   }
 
-  if (kext_bundle_id.compare("mach_kernel") == 0 &&
-      module_spec.GetUUID().IsValid()) {
+  if (kext_bundle_id == "mach_kernel" && module_spec.GetUUID().IsValid()) {
     // First try all kernel binaries that have a dSYM next to them
     for (auto possible_kernel : m_kernel_binaries_with_dsyms) {
       if (FileSystem::Instance().Exists(possible_kernel)) {

@@ -1,9 +1,8 @@
 //===-- Host.cpp - Implement OS Host Concept --------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -211,6 +210,17 @@ StringRef sys::detail::getHostCPUNameForARM(StringRef ProcCpuinfoContent) {
     }
   }
 
+  if (Implementer == "0x48") // HiSilicon Technologies, Inc.
+    // Look for the CPU part line.
+    for (unsigned I = 0, E = Lines.size(); I != E; ++I)
+      if (Lines[I].startswith("CPU part"))
+        // The CPU part is a 3 digit hexadecimal number with a 0x prefix. The
+        // values correspond to the "Part number" in the CP15/c0 register. The
+        // contents are specified in the various processor manuals.
+        return StringSwitch<const char *>(Lines[I].substr(8).ltrim("\t :"))
+          .Case("0xd01", "tsv110")
+          .Default("generic");
+
   if (Implementer == "0x51") // Qualcomm Technologies, Inc.
     // Look for the CPU part line.
     for (unsigned I = 0, E = Lines.size(); I != E; ++I)
@@ -320,7 +330,19 @@ StringRef sys::detail::getHostCPUNameForBPF() {
 #if !defined(__linux__) || !defined(__x86_64__)
   return "generic";
 #else
-  uint8_t insns[40] __attribute__ ((aligned (8))) =
+  uint8_t v3_insns[40] __attribute__ ((aligned (8))) =
+      /* BPF_MOV64_IMM(BPF_REG_0, 0) */
+    { 0xb7, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+      /* BPF_MOV64_IMM(BPF_REG_2, 1) */
+      0xb7, 0x2, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0,
+      /* BPF_JMP32_REG(BPF_JLT, BPF_REG_0, BPF_REG_2, 1) */
+      0xae, 0x20, 0x1, 0x0, 0x0, 0x0, 0x0, 0x0,
+      /* BPF_MOV64_IMM(BPF_REG_0, 1) */
+      0xb7, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0,
+      /* BPF_EXIT_INSN() */
+      0x95, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 };
+
+  uint8_t v2_insns[40] __attribute__ ((aligned (8))) =
       /* BPF_MOV64_IMM(BPF_REG_0, 0) */
     { 0xb7, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
       /* BPF_MOV64_IMM(BPF_REG_2, 1) */
@@ -345,10 +367,23 @@ StringRef sys::detail::getHostCPUNameForBPF() {
   } attr = {};
   attr.prog_type = 1; /* BPF_PROG_TYPE_SOCKET_FILTER */
   attr.insn_cnt = 5;
-  attr.insns = (uint64_t)insns;
+  attr.insns = (uint64_t)v3_insns;
   attr.license = (uint64_t)"DUMMY";
 
-  int fd = syscall(321 /* __NR_bpf */, 5 /* BPF_PROG_LOAD */, &attr, sizeof(attr));
+  int fd = syscall(321 /* __NR_bpf */, 5 /* BPF_PROG_LOAD */, &attr,
+                   sizeof(attr));
+  if (fd >= 0) {
+    close(fd);
+    return "v3";
+  }
+
+  /* Clear the whole attr in case its content changed by syscall. */
+  memset(&attr, 0, sizeof(attr));
+  attr.prog_type = 1; /* BPF_PROG_TYPE_SOCKET_FILTER */
+  attr.insn_cnt = 5;
+  attr.insns = (uint64_t)v2_insns;
+  attr.license = (uint64_t)"DUMMY";
+  fd = syscall(321 /* __NR_bpf */, 5 /* BPF_PROG_LOAD */, &attr, sizeof(attr));
   if (fd >= 0) {
     close(fd);
     return "v2";
@@ -679,9 +714,21 @@ getIntelProcessorTypeAndSubtype(unsigned Family, unsigned Model,
       break;
 
     default: // Unknown family 6 CPU, try to guess.
+      if (Features & (1 << X86::FEATURE_AVX512VBMI2)) {
+        *Type = X86::INTEL_COREI7;
+        *Subtype = X86::INTEL_COREI7_ICELAKE_CLIENT;
+        break;
+      }
+
       if (Features & (1 << X86::FEATURE_AVX512VBMI)) {
         *Type = X86::INTEL_COREI7;
         *Subtype = X86::INTEL_COREI7_CANNONLAKE;
+        break;
+      }
+
+      if (Features2 & (1 << (X86::FEATURE_AVX512VNNI - 32))) {
+        *Type = X86::INTEL_COREI7;
+        *Subtype = X86::INTEL_COREI7_CASCADELAKE;
         break;
       }
 
@@ -869,7 +916,14 @@ static void getAMDProcessorTypeAndSubtype(unsigned Family, unsigned Model,
     break; // "btver2"
   case 23:
     *Type = X86::AMDFAM17H;
-    *Subtype = X86::AMDFAM17H_ZNVER1;
+    if (Model >= 0x30 && Model <= 0x3f) {
+      *Subtype = X86::AMDFAM17H_ZNVER2;
+      break; // "znver2"; 30h-3fh: Zen2
+    }
+    if (Model <= 0x0f) {
+      *Subtype = X86::AMDFAM17H_ZNVER1;
+      break; // "znver1"; 00h-0Fh: Zen1
+    }
     break;
   default:
     break; // "generic"
@@ -886,11 +940,11 @@ static void getAvailableFeatures(unsigned ECX, unsigned EDX, unsigned MaxLeaf,
 
   auto setFeature = [&](unsigned F) {
     if (F < 32)
-      Features |= 1 << F;
+      Features |= 1U << (F & 0x1f);
     else if (F < 64)
-      Features2 |= 1 << (F - 32);
+      Features2 |= 1U << ((F - 32) & 0x1f);
     else if (F < 96)
-      Features3 |= 1 << (F - 64);
+      Features3 |= 1U << ((F - 64) & 0x1f);
     else
       llvm_unreachable("Unexpected FeatureBit");
   };
@@ -1212,6 +1266,7 @@ bool sys::getHostCPUFeatures(StringMap<bool> &Features) {
 
   Features["cmov"]   = (EDX >> 15) & 1;
   Features["mmx"]    = (EDX >> 23) & 1;
+  Features["fxsr"]   = (EDX >> 24) & 1;
   Features["sse"]    = (EDX >> 25) & 1;
   Features["sse2"]   = (EDX >> 26) & 1;
 
@@ -1275,6 +1330,7 @@ bool sys::getHostCPUFeatures(StringMap<bool> &Features) {
   Features["bmi2"]       = HasLeaf7 && ((EBX >>  8) & 1);
   Features["invpcid"]    = HasLeaf7 && ((EBX >> 10) & 1);
   Features["rtm"]        = HasLeaf7 && ((EBX >> 11) & 1);
+  Features["mpx"]        = HasLeaf7 && ((EBX >> 14) & 1);
   // AVX512 is only supported if the OS supports the context save for it.
   Features["avx512f"]    = HasLeaf7 && ((EBX >> 16) & 1) && HasAVX512Save;
   Features["avx512dq"]   = HasLeaf7 && ((EBX >> 17) & 1) && HasAVX512Save;

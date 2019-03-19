@@ -1,18 +1,14 @@
 //===-- AppleThreadPlanStepThroughObjCTrampoline.cpp
 //--------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-// C Includes
-// C++ Includes
-// Other libraries and framework includes
-// Project includes
 #include "AppleThreadPlanStepThroughObjCTrampoline.h"
+
 #include "AppleObjCTrampolineHandler.h"
 #include "lldb/Expression/DiagnosticManager.h"
 #include "lldb/Expression/FunctionCaller.h"
@@ -24,6 +20,8 @@
 #include "lldb/Target/ThreadPlanRunToAddress.h"
 #include "lldb/Target/ThreadPlanStepOut.h"
 #include "lldb/Utility/Log.h"
+
+#include <memory>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -161,13 +159,15 @@ bool AppleThreadPlanStepThroughObjCTrampoline::ShouldStop(Event *event_ptr) {
 
       SymbolContext sc = m_thread.GetStackFrameAtIndex(0)->GetSymbolContext(
           eSymbolContextEverything);
+      Status status;
       const bool abort_other_plans = false;
       const bool first_insn = true;
       const uint32_t frame_idx = 0;
       m_run_to_sp = m_thread.QueueThreadPlanForStepOutNoShouldStop(
           abort_other_plans, &sc, first_insn, m_stop_others, eVoteNoOpinion,
-          eVoteNoOpinion, frame_idx);
-      m_run_to_sp->SetPrivate(true);
+          eVoteNoOpinion, frame_idx, status);
+      if (m_run_to_sp && status.Success())
+        m_run_to_sp->SetPrivate(true);
       return false;
     }
 
@@ -186,8 +186,8 @@ bool AppleThreadPlanStepThroughObjCTrampoline::ShouldStop(Event *event_ptr) {
 
     // Extract the target address from the value:
 
-    m_run_to_sp.reset(
-        new ThreadPlanRunToAddress(m_thread, target_so_addr, m_stop_others));
+    m_run_to_sp = std::make_shared<ThreadPlanRunToAddress>(
+        m_thread, target_so_addr, m_stop_others);
     m_thread.QueueThreadPlan(m_run_to_sp, false);
     m_run_to_sp->SetPrivate(true);
     return false;
@@ -202,10 +202,7 @@ bool AppleThreadPlanStepThroughObjCTrampoline::ShouldStop(Event *event_ptr) {
 // The base class MischiefManaged does some cleanup - so you have to call it in
 // your MischiefManaged derived class.
 bool AppleThreadPlanStepThroughObjCTrampoline::MischiefManaged() {
-  if (IsPlanComplete())
-    return true;
-  else
-    return false;
+  return IsPlanComplete();
 }
 
 bool AppleThreadPlanStepThroughObjCTrampoline::WillStop() { return true; }

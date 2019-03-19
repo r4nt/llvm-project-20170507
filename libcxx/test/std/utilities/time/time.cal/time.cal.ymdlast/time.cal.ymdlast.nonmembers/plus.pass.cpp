@@ -1,9 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // UNSUPPORTED: c++98, c++03, c++11, c++14, c++17
@@ -15,22 +14,22 @@
 //   operator+(const year_month_day_last& ymdl, const months& dm) noexcept;
 //
 //   Returns: (ymdl.year() / ymdl.month() + dm) / last.
-// 
+//
 // constexpr year_month_day_last
 //   operator+(const months& dm, const year_month_day_last& ymdl) noexcept;
 //
 //   Returns: ymdl + dm.
 //
 //
-// constexpr year_month_day_last 
+// constexpr year_month_day_last
 //   operator+(const year_month_day_last& ymdl, const years& dy) noexcept;
 //
 //   Returns: {ymdl.year()+dy, ymdl.month_day_last()}.
-// 
+//
 // constexpr year_month_day_last
 //   operator+(const years& dy, const year_month_day_last& ymdl) noexcept;
 //
-//   Returns: ymdl + dy 
+//   Returns: ymdl + dy
 
 
 
@@ -64,11 +63,10 @@ constexpr bool testConstexprMonths(std::chrono::year_month_day_last ymdl)
 }
 
 
-int main()
+int main(int, char**)
 {
     using year                = std::chrono::year;
     using month               = std::chrono::month;
-    using day                 = std::chrono::day;
     using month_day_last      = std::chrono::month_day_last;
     using year_month_day_last = std::chrono::year_month_day_last;
     using months              = std::chrono::months;
@@ -104,7 +102,7 @@ int main()
 
     ASSERT_SAME_TYPE(year_month_day_last, decltype(std::declval<year_month_day_last>() + std::declval<years>()));
     ASSERT_SAME_TYPE(year_month_day_last, decltype(std::declval<years>() + std::declval<year_month_day_last>()));
-    
+
     static_assert(testConstexprYears(year_month_day_last{year{1}, month_day_last{January}}), "");
 
     year_month_day_last ym{year{1234}, month_day_last{January}};
@@ -120,4 +118,6 @@ int main()
     }
     }
 
+
+  return 0;
 }

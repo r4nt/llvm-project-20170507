@@ -1,29 +1,24 @@
 //===-- ClangExpressionVariable.h -------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef liblldb_ClangExpressionVariable_h_
 #define liblldb_ClangExpressionVariable_h_
 
-// C Includes
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
 
-// C++ Includes
 #include <map>
 #include <string>
 #include <vector>
 
-// Other libraries and framework includes
 #include "llvm/Support/Casting.h"
 
-// Project includes
 #include "lldb/Core/ClangForward.h"
 #include "lldb/Core/Value.h"
 #include "lldb/Expression/ExpressionVariable.h"
@@ -40,7 +35,7 @@ namespace lldb_private {
 class ValueObjectConstResult;
 
 //----------------------------------------------------------------------
-/// @class ClangExpressionVariable ClangExpressionVariable.h
+/// \class ClangExpressionVariable ClangExpressionVariable.h
 /// "lldb/Expression/ClangExpressionVariable.h" Encapsulates one variable for
 /// the expression parser.
 ///
@@ -67,12 +62,12 @@ public:
                           lldb::ByteOrder byte_order, uint32_t addr_byte_size);
 
   ClangExpressionVariable(ExecutionContextScope *exe_scope, Value &value,
-                          const ConstString &name, uint16_t flags = EVNone);
+                          ConstString name, uint16_t flags = EVNone);
 
   ClangExpressionVariable(const lldb::ValueObjectSP &valobj_sp);
 
   ClangExpressionVariable(ExecutionContextScope *exe_scope,
-                          const ConstString &name,
+                          ConstString name,
                           const TypeFromUser &user_type,
                           lldb::ByteOrder byte_order, uint32_t addr_byte_size);
 
@@ -84,10 +79,10 @@ public:
   //----------------------------------------------------------------------
   /// Finds a variable by NamedDecl in the list.
   ///
-  /// @param[in] name
+  /// \param[in] name
   ///     The name of the requested variable.
   ///
-  /// @return
+  /// \return
   ///     The variable requested, or NULL if that variable is not in the list.
   //----------------------------------------------------------------------
   static ClangExpressionVariable *
@@ -114,13 +109,13 @@ public:
   /// exe_ctx in not NULL, the value will be resolved in with that execution
   /// context.
   ///
-  /// @param[in] value
+  /// \param[in] value
   ///     The value to point at the data.
   ///
-  /// @param[in] exe_ctx
+  /// \param[in] exe_ctx
   ///     The execution context to use to resolve \a value.
   ///
-  /// @return
+  /// \return
   ///     True on success; false otherwise (in particular, if this variable
   ///     does not contain its own data).
   //----------------------------------------------------------------------

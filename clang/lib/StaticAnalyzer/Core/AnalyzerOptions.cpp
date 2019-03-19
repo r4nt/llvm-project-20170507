@@ -1,9 +1,8 @@
 //===- AnalyzerOptions.cpp - Analysis Engine Options ----------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -34,7 +33,7 @@ std::vector<StringRef>
 AnalyzerOptions::getRegisteredCheckers(bool IncludeExperimental /* = false */) {
   static const StringRef StaticAnalyzerChecks[] = {
 #define GET_CHECKERS
-#define CHECKER(FULLNAME, CLASS, DESCFILE, HELPTEXT, GROUPINDEX, HIDDEN)       \
+#define CHECKER(FULLNAME, CLASS, HELPTEXT, DOC_URI)                            \
   FULLNAME,
 #include "clang/StaticAnalyzer/Checkers/Checkers.inc"
 #undef CHECKER
@@ -49,28 +48,11 @@ AnalyzerOptions::getRegisteredCheckers(bool IncludeExperimental /* = false */) {
   return Result;
 }
 
-UserModeKind AnalyzerOptions::getUserMode() {
-  if (!UserMode.hasValue()) {
-    UserMode = getOptionAsString("mode", "deep");
-  }
-
-  auto K = llvm::StringSwitch<llvm::Optional<UserModeKind>>(*UserMode)
-    .Case("shallow", UMK_Shallow)
-    .Case("deep", UMK_Deep)
-    .Default(None);
-  assert(UserMode.hasValue() && "User mode is invalid.");
-  return K.getValue();
-}
-
 ExplorationStrategyKind
-AnalyzerOptions::getExplorationStrategy() {
-  if (!ExplorationStrategy.hasValue()) {
-    ExplorationStrategy = getOptionAsString("exploration_strategy",
-                                            "unexplored_first_queue");
-  }
+AnalyzerOptions::getExplorationStrategy() const {
   auto K =
     llvm::StringSwitch<llvm::Optional<ExplorationStrategyKind>>(
-                                                           *ExplorationStrategy)
+                                                            ExplorationStrategy)
           .Case("dfs", ExplorationStrategyKind::DFS)
           .Case("bfs", ExplorationStrategyKind::BFS)
           .Case("unexplored_first",
@@ -86,18 +68,8 @@ AnalyzerOptions::getExplorationStrategy() {
   return K.getValue();
 }
 
-IPAKind AnalyzerOptions::getIPAMode() {
-  if (!IPAMode.hasValue()) {
-    switch (getUserMode()) {
-    case UMK_Shallow:
-      IPAMode = getOptionAsString("ipa", "inlining");
-      break;
-    case UMK_Deep:
-      IPAMode = getOptionAsString("ipa", "dynamic-bifurcate");
-      break;
-    }
-  }
-  auto K = llvm::StringSwitch<llvm::Optional<IPAKind>>(*IPAMode)
+IPAKind AnalyzerOptions::getIPAMode() const {
+  auto K = llvm::StringSwitch<llvm::Optional<IPAKind>>(IPAMode)
           .Case("none", IPAK_None)
           .Case("basic-inlining", IPAK_BasicInlining)
           .Case("inlining", IPAK_Inlining)
@@ -110,17 +82,14 @@ IPAKind AnalyzerOptions::getIPAMode() {
 }
 
 bool
-AnalyzerOptions::mayInlineCXXMemberFunction(CXXInlineableMemberKind Param) {
-  if (!CXXMemberInliningMode.hasValue()) {
-    CXXMemberInliningMode = getOptionAsString("c++-inlining", "destructors");
-  }
-
+AnalyzerOptions::mayInlineCXXMemberFunction(
+                                          CXXInlineableMemberKind Param) const {
   if (getIPAMode() < IPAK_Inlining)
     return false;
 
   auto K =
     llvm::StringSwitch<llvm::Optional<CXXInlineableMemberKind>>(
-                                                         *CXXMemberInliningMode)
+                                                          CXXMemberInliningMode)
     .Case("constructors", CIMK_Constructors)
     .Case("destructors", CIMK_Destructors)
     .Case("methods", CIMK_MemberFunctions)
@@ -132,14 +101,14 @@ AnalyzerOptions::mayInlineCXXMemberFunction(CXXInlineableMemberKind Param) {
   return *K >= Param;
 }
 
-static StringRef toString(bool b) { return b ? "true" : "false"; }
+StringRef AnalyzerOptions::getCheckerStringOption(StringRef CheckerName,
+                                                  StringRef OptionName,
+                                                  StringRef DefaultVal,
+                                                  bool SearchInParents ) const {
+  assert(!CheckerName.empty() &&
+         "Empty checker name! Make sure the checker object (including it's "
+         "bases!) if fully initialized before calling this function!");
 
-StringRef AnalyzerOptions::getCheckerOption(StringRef CheckerName,
-                                            StringRef OptionName,
-                                            StringRef Default,
-                                            bool SearchInParents) {
-  // Search for a package option if the option for the checker is not specified
-  // and search in parents is enabled.
   ConfigTable::const_iterator E = Config.end();
   do {
     ConfigTable::const_iterator I =
@@ -148,129 +117,62 @@ StringRef AnalyzerOptions::getCheckerOption(StringRef CheckerName,
       return StringRef(I->getValue());
     size_t Pos = CheckerName.rfind('.');
     if (Pos == StringRef::npos)
-      return Default;
+      return DefaultVal;
     CheckerName = CheckerName.substr(0, Pos);
   } while (!CheckerName.empty() && SearchInParents);
-  return Default;
+  return DefaultVal;
 }
 
-bool AnalyzerOptions::getBooleanOption(StringRef Name, bool DefaultVal,
-                                       const CheckerBase *C,
-                                       bool SearchInParents) {
+StringRef AnalyzerOptions::getCheckerStringOption(const ento::CheckerBase *C,
+                                                  StringRef OptionName,
+                                                  StringRef DefaultVal,
+                                                  bool SearchInParents ) const {
+  return getCheckerStringOption(
+             C->getTagDescription(), OptionName, DefaultVal, SearchInParents);
+}
+
+bool AnalyzerOptions::getCheckerBooleanOption(StringRef CheckerName,
+                                              StringRef OptionName,
+                                              bool DefaultVal,
+                                              bool SearchInParents ) const {
   // FIXME: We should emit a warning here if the value is something other than
   // "true", "false", or the empty string (meaning the default value),
   // but the AnalyzerOptions doesn't have access to a diagnostic engine.
-  StringRef Default = toString(DefaultVal);
-  StringRef V =
-      C ? getCheckerOption(C->getTagDescription(), Name, Default,
-                           SearchInParents)
-        : getOptionAsString(Name, Default);
-  return llvm::StringSwitch<bool>(V)
+  return llvm::StringSwitch<bool>(
+      getCheckerStringOption(CheckerName, OptionName,
+                             DefaultVal ? "true" : "false",
+                             SearchInParents))
       .Case("true", true)
       .Case("false", false)
       .Default(DefaultVal);
 }
 
-bool AnalyzerOptions::getBooleanOption(Optional<bool> &V, StringRef Name,
-                                       bool DefaultVal, const CheckerBase *C,
-                                       bool SearchInParents) {
-  if (!V.hasValue())
-    V = getBooleanOption(Name, DefaultVal, C, SearchInParents);
-  return V.getValue();
+bool AnalyzerOptions::getCheckerBooleanOption(const ento::CheckerBase *C,
+                                              StringRef OptionName,
+                                              bool DefaultVal,
+                                              bool SearchInParents ) const {
+  return getCheckerBooleanOption(
+             C->getTagDescription(), OptionName, DefaultVal, SearchInParents);
 }
 
-int AnalyzerOptions::getOptionAsInteger(StringRef Name, int DefaultVal,
-                                        const CheckerBase *C,
-                                        bool SearchInParents) {
-  SmallString<10> StrBuf;
-  llvm::raw_svector_ostream OS(StrBuf);
-  OS << DefaultVal;
-
-  StringRef V = C ? getCheckerOption(C->getTagDescription(), Name, OS.str(),
-                                     SearchInParents)
-                  : getOptionAsString(Name, OS.str());
-
-  int Res = DefaultVal;
-  bool b = V.getAsInteger(10, Res);
-  assert(!b && "analyzer-config option should be numeric");
-  (void)b;
-  return Res;
+int AnalyzerOptions::getCheckerIntegerOption(StringRef CheckerName,
+                                             StringRef OptionName,
+                                             int DefaultVal,
+                                             bool SearchInParents ) const {
+  int Ret = DefaultVal;
+  bool HasFailed = getCheckerStringOption(CheckerName, OptionName,
+                                          std::to_string(DefaultVal),
+                                          SearchInParents)
+                     .getAsInteger(10, Ret);
+  assert(!HasFailed && "analyzer-config option should be numeric");
+  (void)HasFailed;
+  return Ret;
 }
 
-unsigned AnalyzerOptions::getOptionAsUInt(Optional<unsigned> &V, StringRef Name,
-                                          unsigned DefaultVal,
-                                          const CheckerBase *C,
-                                          bool SearchInParents) {
-  if (!V.hasValue())
-    V = getOptionAsInteger(Name, DefaultVal, C, SearchInParents);
-  return V.getValue();
-}
-
-StringRef AnalyzerOptions::getOptionAsString(StringRef Name,
-                                             StringRef DefaultVal,
-                                             const CheckerBase *C,
-                                             bool SearchInParents) {
-  return C ? getCheckerOption(C->getTagDescription(), Name, DefaultVal,
-                              SearchInParents)
-           : StringRef(
-                 Config.insert(std::make_pair(Name, DefaultVal)).first->second);
-}
-
-StringRef AnalyzerOptions::getOptionAsString(Optional<StringRef> &V,
-                                             StringRef Name,
-                                             StringRef DefaultVal,
-                                             const ento::CheckerBase *C,
-                                             bool SearchInParents) {
-  if (!V.hasValue())
-    V = getOptionAsString(Name, DefaultVal, C, SearchInParents);
-  return V.getValue();
-}
-
-static bool getOption(AnalyzerOptions &A, Optional<bool> &V, StringRef Name,
-                      bool DefaultVal) {
-  return A.getBooleanOption(V, Name, DefaultVal);
-}
-
-static unsigned getOption(AnalyzerOptions &A, Optional<unsigned> &V,
-                          StringRef Name, unsigned DefaultVal) {
-  return A.getOptionAsUInt(V, Name, DefaultVal);
-}
-
-static StringRef getOption(AnalyzerOptions &A, Optional<StringRef> &V,
-                           StringRef Name, StringRef DefaultVal) {
-  return A.getOptionAsString(V, Name, DefaultVal);
-}
-
-#define ANALYZER_OPTION_GEN_FN(TYPE, NAME, CMDFLAG, DESC, DEFAULT_VAL,  \
-                                CREATE_FN)                              \
-TYPE AnalyzerOptions::CREATE_FN() {                                     \
-  return getOption(*this, NAME, CMDFLAG, DEFAULT_VAL);                  \
-}
-
-#define ANALYZER_OPTION_GEN_FN_DEPENDS_ON_USER_MODE(                    \
-    TYPE, NAME, CMDFLAG, DESC, SHALLOW_VAL, DEEP_VAL, CREATE_FN)        \
-TYPE AnalyzerOptions::CREATE_FN() {                                     \
-  switch (getUserMode()) {                                              \
-  case UMK_Shallow:                                                     \
-    return getOption(*this, NAME, CMDFLAG, SHALLOW_VAL);                \
-  case UMK_Deep:                                                        \
-    return getOption(*this, NAME, CMDFLAG, DEEP_VAL);                   \
-  }                                                                     \
-                                                                        \
-  llvm_unreachable("Unknown usermode!");                                \
-  return {};                                                            \
-}
-
-#include "clang/StaticAnalyzer/Core/AnalyzerOptions.def"
-
-#undef ANALYZER_OPTION_GEN_FN_DEPENDS_ON_USER_MODE
-#undef ANALYZER_OPTION_WITH_FN
-
-StringRef AnalyzerOptions::getCTUDir() {
-  if (!CTUDir.hasValue()) {
-    CTUDir = getOptionAsString("ctu-dir", "");
-    if (!llvm::sys::fs::is_directory(*CTUDir))
-      CTUDir = "";
-  }
-  return CTUDir.getValue();
+int AnalyzerOptions::getCheckerIntegerOption(const ento::CheckerBase *C,
+                                             StringRef OptionName,
+                                             int DefaultVal,
+                                             bool SearchInParents ) const {
+  return getCheckerIntegerOption(
+             C->getTagDescription(), OptionName, DefaultVal, SearchInParents);
 }

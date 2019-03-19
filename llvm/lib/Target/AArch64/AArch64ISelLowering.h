@@ -1,9 +1,8 @@
 //==-- AArch64ISelLowering.h - AArch64 DAG Lowering Interface ----*- C++ -*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -287,7 +286,8 @@ public:
 
   bool isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const override;
 
-  bool isFPImmLegal(const APFloat &Imm, EVT VT) const override;
+  bool isFPImmLegal(const APFloat &Imm, EVT VT,
+                    bool ForCodeSize) const override;
 
   /// Return true if the given shuffle mask can be codegen'd directly, or if it
   /// should be stack expanded.
@@ -301,6 +301,12 @@ public:
 
   MachineBasicBlock *EmitF128CSEL(MachineInstr &MI,
                                   MachineBasicBlock *BB) const;
+
+  MachineBasicBlock *EmitLoweredCatchRet(MachineInstr &MI,
+                                           MachineBasicBlock *BB) const;
+
+  MachineBasicBlock *EmitLoweredCatchPad(MachineInstr &MI,
+                                         MachineBasicBlock *BB) const;
 
   MachineBasicBlock *
   EmitInstrWithCustomInserter(MachineInstr &MI,
@@ -321,6 +327,9 @@ public:
   bool isZExtFree(Type *Ty1, Type *Ty2) const override;
   bool isZExtFree(EVT VT1, EVT VT2) const override;
   bool isZExtFree(SDValue Val, EVT VT2) const override;
+
+  bool shouldSinkOperands(Instruction *I,
+                          SmallVectorImpl<Use *> &Ops) const override;
 
   bool hasPairedLoad(EVT LoadedType, unsigned &RequiredAligment) const override;
 
@@ -395,11 +404,15 @@ public:
 
   bool useLoadStackGuardNode() const override;
   TargetLoweringBase::LegalizeTypeAction
-  getPreferredVectorAction(EVT VT) const override;
+  getPreferredVectorAction(MVT VT) const override;
 
   /// If the target has a standard location for the stack protector cookie,
   /// returns the address of that location. Otherwise, returns nullptr.
   Value *getIRStackGuard(IRBuilder<> &IRB) const override;
+
+  void insertSSPDeclarations(Module &M) const override;
+  Value *getSDagStackGuard(const Module &M) const override;
+  Function *getSSPStackGuardCheck(const Module &M) const override;
 
   /// If the target has a standard location for the unsafe stack pointer,
   /// returns the address of that location. Otherwise, returns nullptr.
@@ -460,6 +473,12 @@ public:
     return VT.getSizeInBits() >= 64; // vector 'bic'
   }
 
+  bool shouldExpandShift(SelectionDAG &DAG, SDNode *N) const override {
+    if (DAG.getMachineFunction().getFunction().optForMinSize())
+      return false;
+    return true;
+  }
+
   bool shouldTransformSignedTruncationCheck(EVT XVT,
                                             unsigned KeptBits) const override {
     // For vectors, we don't have a preference..
@@ -517,6 +536,8 @@ public:
   bool functionArgumentNeedsConsecutiveRegisters(Type *Ty,
                                                  CallingConv::ID CallConv,
                                                  bool isVarArg) const override;
+  /// Used for exception handling on Win64.
+  bool needsFixedCatchObjects() const override;
 private:
   /// Keep a pointer to the AArch64Subtarget around so that we can
   /// make the right decision when generating code for different targets.
@@ -636,9 +657,9 @@ private:
   SDValue LowerFCOPYSIGN(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerVectorFP_TO_INT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerVectorAND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVectorOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFSINCOS(SDValue Op, SelectionDAG &DAG) const;

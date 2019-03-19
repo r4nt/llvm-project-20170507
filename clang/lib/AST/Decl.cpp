@@ -1,9 +1,8 @@
 //===- Decl.cpp - Declaration AST Node Implementation ---------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,6 +13,7 @@
 #include "clang/AST/Decl.h"
 #include "Linkage.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/ASTLambda.h"
 #include "clang/AST/ASTMutationListener.h"
 #include "clang/AST/CanonicalType.h"
@@ -49,7 +49,6 @@
 #include "clang/Basic/TargetCXXABI.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Visibility.h"
-#include "clang/Frontend/FrontendDiagnostic.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/None.h"
@@ -2652,27 +2651,30 @@ FunctionDecl::FunctionDecl(Kind DK, ASTContext &C, DeclContext *DC,
                      StartLoc),
       DeclContext(DK), redeclarable_base(C), ODRHash(0),
       EndRangeLoc(NameInfo.getEndLoc()), DNLoc(NameInfo.getInfo()) {
-  setStorageClass(S);
-  setInlineSpecified(isInlineSpecified);
-  setExplicitSpecified(false);
-  setVirtualAsWritten(false);
-  setPure(false);
-  setHasInheritedPrototype(false);
-  setHasWrittenPrototype(true);
-  setDeletedAsWritten(false);
-  setTrivial(false);
-  setTrivialForCall(false);
-  setDefaulted(false);
-  setExplicitlyDefaulted(false);
-  setHasImplicitReturnZero(false);
-  setLateTemplateParsed(false);
-  setConstexpr(isConstexprSpecified);
-  setInstantiationIsPending(false);
-  setUsesSEHTry(false);
-  setHasSkippedBody(false);
-  setWillHaveBody(false);
-  setIsMultiVersion(false);
-  setHasODRHash(false);
+  assert(T.isNull() || T->isFunctionType());
+  FunctionDeclBits.SClass = S;
+  FunctionDeclBits.IsInline = isInlineSpecified;
+  FunctionDeclBits.IsInlineSpecified = isInlineSpecified;
+  FunctionDeclBits.IsExplicitSpecified = false;
+  FunctionDeclBits.IsVirtualAsWritten = false;
+  FunctionDeclBits.IsPure = false;
+  FunctionDeclBits.HasInheritedPrototype = false;
+  FunctionDeclBits.HasWrittenPrototype = true;
+  FunctionDeclBits.IsDeleted = false;
+  FunctionDeclBits.IsTrivial = false;
+  FunctionDeclBits.IsTrivialForCall = false;
+  FunctionDeclBits.IsDefaulted = false;
+  FunctionDeclBits.IsExplicitlyDefaulted = false;
+  FunctionDeclBits.HasImplicitReturnZero = false;
+  FunctionDeclBits.IsLateTemplateParsed = false;
+  FunctionDeclBits.IsConstexpr = isConstexprSpecified;
+  FunctionDeclBits.InstantiationIsPending = false;
+  FunctionDeclBits.UsesSEHTry = false;
+  FunctionDeclBits.HasSkippedBody = false;
+  FunctionDeclBits.WillHaveBody = false;
+  FunctionDeclBits.IsMultiVersion = false;
+  FunctionDeclBits.IsCopyDeductionCandidate = false;
+  FunctionDeclBits.HasODRHash = false;
 }
 
 void FunctionDecl::getNameForDiagnostic(
@@ -2939,6 +2941,17 @@ bool FunctionDecl::isNoReturn() const {
   return false;
 }
 
+
+MultiVersionKind FunctionDecl::getMultiVersionKind() const {
+  if (hasAttr<TargetAttr>())
+    return MultiVersionKind::Target;
+  if (hasAttr<CPUDispatchAttr>())
+    return MultiVersionKind::CPUDispatch;
+  if (hasAttr<CPUSpecificAttr>())
+    return MultiVersionKind::CPUSpecific;
+  return MultiVersionKind::None;
+}
+
 bool FunctionDecl::isCPUDispatchMultiVersion() const {
   return isMultiVersion() && hasAttr<CPUDispatchAttr>();
 }
@@ -2968,16 +2981,20 @@ FunctionDecl::setPreviousDeclaration(FunctionDecl *PrevDecl) {
 
 FunctionDecl *FunctionDecl::getCanonicalDecl() { return getFirstDecl(); }
 
-/// Returns a value indicating whether this function
-/// corresponds to a builtin function.
+/// Returns a value indicating whether this function corresponds to a builtin
+/// function.
 ///
-/// The function corresponds to a built-in function if it is
-/// declared at translation scope or within an extern "C" block and
-/// its name matches with the name of a builtin. The returned value
-/// will be 0 for functions that do not correspond to a builtin, a
-/// value of type \c Builtin::ID if in the target-independent range
-/// \c [1,Builtin::First), or a target-specific builtin value.
-unsigned FunctionDecl::getBuiltinID() const {
+/// The function corresponds to a built-in function if it is declared at
+/// translation scope or within an extern "C" block and its name matches with
+/// the name of a builtin. The returned value will be 0 for functions that do
+/// not correspond to a builtin, a value of type \c Builtin::ID if in the
+/// target-independent range \c [1,Builtin::First), or a target-specific builtin
+/// value.
+///
+/// \param ConsiderWrapperFunctions If true, we should consider wrapper
+/// functions as their wrapped builtins. This shouldn't be done in general, but
+/// it's useful in Sema to diagnose calls to wrappers based on their semantics.
+unsigned FunctionDecl::getBuiltinID(bool ConsiderWrapperFunctions) const {
   if (!getIdentifier())
     return 0;
 
@@ -3005,7 +3022,7 @@ unsigned FunctionDecl::getBuiltinID() const {
 
   // If the function is marked "overloadable", it has a different mangled name
   // and is not the C library function.
-  if (hasAttr<OverloadableAttr>())
+  if (!ConsiderWrapperFunctions && hasAttr<OverloadableAttr>())
     return 0;
 
   if (!Context.BuiltinInfo.isPredefinedLibFunction(BuiltinID))
@@ -3016,7 +3033,7 @@ unsigned FunctionDecl::getBuiltinID() const {
   // function or whether it just has the same name.
 
   // If this is a static function, it's not a builtin.
-  if (getStorageClass() == SC_Static)
+  if (!ConsiderWrapperFunctions && getStorageClass() == SC_Static)
     return 0;
 
   // OpenCL v1.2 s6.9.f - The library functions defined in
@@ -3215,20 +3232,6 @@ SourceRange FunctionDecl::getExceptionSpecSourceRange() const {
     return SourceRange();
 
   return FTL.getExceptionSpecRange();
-}
-
-const Attr *FunctionDecl::getUnusedResultAttr() const {
-  QualType RetType = getReturnType();
-  if (const auto *Ret = RetType->getAsRecordDecl()) {
-    if (const auto *R = Ret->getAttr<WarnUnusedResultAttr>())
-      return R;
-  } else if (const auto *ET = RetType->getAs<EnumType>()) {
-    if (const EnumDecl *ED = ET->getDecl()) {
-      if (const auto *R = ED->getAttr<WarnUnusedResultAttr>())
-        return R;
-    }
-  }
-  return getAttr<WarnUnusedResultAttr>();
 }
 
 /// For an inline function definition in C, or for a gnu_inline function
@@ -3673,6 +3676,10 @@ unsigned FunctionDecl::getMemoryFunctionKind() const {
   case Builtin::BImemcmp:
     return Builtin::BImemcmp;
 
+  case Builtin::BI__builtin_bcmp:
+  case Builtin::BIbcmp:
+    return Builtin::BIbcmp;
+
   case Builtin::BI__builtin_strncpy:
   case Builtin::BI__builtin___strncpy_chk:
   case Builtin::BIstrncpy:
@@ -3713,6 +3720,8 @@ unsigned FunctionDecl::getMemoryFunctionKind() const {
         return Builtin::BImemmove;
       else if (FnInfo->isStr("memcmp"))
         return Builtin::BImemcmp;
+      else if (FnInfo->isStr("bcmp"))
+        return Builtin::BIbcmp;
       else if (FnInfo->isStr("strncpy"))
         return Builtin::BIstrncpy;
       else if (FnInfo->isStr("strncmp"))
@@ -4260,6 +4269,7 @@ BlockDecl::BlockDecl(DeclContext *DC, SourceLocation CaretLoc)
   setBlockMissingReturnType(true);
   setIsConversionFromLambda(false);
   setDoesNotEscape(false);
+  setCanAvoidCopyToHeap(false);
 }
 
 void BlockDecl::setParams(ArrayRef<ParmVarDecl *> NewParamInfo) {

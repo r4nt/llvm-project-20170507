@@ -1,9 +1,8 @@
 //===-- Target.cpp ----------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 #include "Target.h"
@@ -46,6 +45,7 @@ ExegesisTarget::createSnippetGenerator(InstructionBenchmark::ModeE Mode,
   case InstructionBenchmark::Latency:
     return createLatencySnippetGenerator(State);
   case InstructionBenchmark::Uops:
+  case InstructionBenchmark::InverseThroughput:
     return createUopsSnippetGenerator(State);
   }
   return nullptr;
@@ -58,7 +58,8 @@ ExegesisTarget::createBenchmarkRunner(InstructionBenchmark::ModeE Mode,
   case InstructionBenchmark::Unknown:
     return nullptr;
   case InstructionBenchmark::Latency:
-    return createLatencyBenchmarkRunner(State);
+  case InstructionBenchmark::InverseThroughput:
+    return createLatencyBenchmarkRunner(State, Mode);
   case InstructionBenchmark::Uops:
     return createUopsBenchmarkRunner(State);
   }
@@ -75,9 +76,9 @@ ExegesisTarget::createUopsSnippetGenerator(const LLVMState &State) const {
   return llvm::make_unique<UopsSnippetGenerator>(State);
 }
 
-std::unique_ptr<BenchmarkRunner>
-ExegesisTarget::createLatencyBenchmarkRunner(const LLVMState &State) const {
-  return llvm::make_unique<LatencyBenchmarkRunner>(State);
+std::unique_ptr<BenchmarkRunner> ExegesisTarget::createLatencyBenchmarkRunner(
+    const LLVMState &State, InstructionBenchmark::ModeE Mode) const {
+  return llvm::make_unique<LatencyBenchmarkRunner>(State, Mode);
 }
 
 std::unique_ptr<BenchmarkRunner>
@@ -87,7 +88,8 @@ ExegesisTarget::createUopsBenchmarkRunner(const LLVMState &State) const {
 
 static_assert(std::is_pod<PfmCountersInfo>::value,
               "We shouldn't have dynamic initialization here");
-const PfmCountersInfo PfmCountersInfo::Default = {nullptr, nullptr, nullptr, 0u};
+const PfmCountersInfo PfmCountersInfo::Default = {nullptr, nullptr, nullptr,
+                                                  0u};
 
 const PfmCountersInfo &
 ExegesisTarget::getPfmCounters(llvm::StringRef CpuName) const {
@@ -103,7 +105,13 @@ ExegesisTarget::getPfmCounters(llvm::StringRef CpuName) const {
       std::lower_bound(CpuPfmCounters.begin(), CpuPfmCounters.end(), CpuName);
   if (Found == CpuPfmCounters.end() ||
       llvm::StringRef(Found->CpuName) != CpuName) {
-    return PfmCountersInfo::Default;
+    // Use the default.
+    if (CpuPfmCounters.begin() != CpuPfmCounters.end() &&
+        CpuPfmCounters.begin()->CpuName[0] == '\0') {
+      Found = CpuPfmCounters.begin(); // The target specifies a default.
+    } else {
+      return PfmCountersInfo::Default; // No default for the target.
+    }
   }
   assert(Found->PCI && "Missing counters");
   return *Found->PCI;

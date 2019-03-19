@@ -1,9 +1,8 @@
 //===- GCOVProfiling.cpp - Insert edge counters for gcov profiling --------===//
 //
-//                      The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -36,6 +35,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Regex.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
@@ -96,18 +96,25 @@ private:
   // profiling runtime to emit .gcda files when run.
   bool emitProfileArcs();
 
+  bool isFunctionInstrumented(const Function &F);
+  std::vector<Regex> createRegexesFromString(StringRef RegexesStr);
+  static bool doesFilenameMatchARegex(StringRef Filename,
+                                      std::vector<Regex> &Regexes);
+
   // Get pointers to the functions in the runtime library.
-  Constant *getStartFileFunc();
-  Constant *getEmitFunctionFunc();
-  Constant *getEmitArcsFunc();
-  Constant *getSummaryInfoFunc();
-  Constant *getEndFileFunc();
+  FunctionCallee getStartFileFunc();
+  FunctionCallee getEmitFunctionFunc();
+  FunctionCallee getEmitArcsFunc();
+  FunctionCallee getSummaryInfoFunc();
+  FunctionCallee getEndFileFunc();
 
   // Add the function to write out all our counters to the global destructor
   // list.
   Function *
   insertCounterWriteout(ArrayRef<std::pair<GlobalVariable *, MDNode *>>);
   Function *insertFlush(ArrayRef<std::pair<GlobalVariable *, MDNode *>>);
+
+  void AddFlushBeforeForkAndExec();
 
   enum class GCovFileType { GCNO, GCDA };
   std::string mangleName(const DICompileUnit *CU, GCovFileType FileType);
@@ -123,6 +130,9 @@ private:
   const TargetLibraryInfo *TLI;
   LLVMContext *Ctx;
   SmallVector<std::unique_ptr<GCOVFunction>, 16> Funcs;
+  std::vector<Regex> FilterRe;
+  std::vector<Regex> ExcludeRe;
+  StringMap<bool> InstrumentedFiles;
 };
 
 class GCOVProfilerLegacyPass : public ModulePass {
@@ -167,6 +177,21 @@ static StringRef getFunctionName(const DISubprogram *SP) {
   if (!SP->getLinkageName().empty())
     return SP->getLinkageName();
   return SP->getName();
+}
+
+/// Extract a filename for a DISubprogram.
+///
+/// Prefer relative paths in the coverage notes. Clang also may split
+/// up absolute paths into a directory and filename component. When
+/// the relative path doesn't exist, reconstruct the absolute path.
+static SmallString<128> getFilename(const DISubprogram *SP) {
+  SmallString<128> Path;
+  StringRef RelPath = SP->getFilename();
+  if (sys::fs::exists(RelPath))
+    Path = RelPath;
+  else
+    sys::path::append(Path, SP->getDirectory(), SP->getFilename());
+  return Path;
 }
 
 namespace {
@@ -245,7 +270,7 @@ namespace {
     }
 
    private:
-    StringRef Filename;
+    std::string Filename;
     SmallVector<uint32_t, 32> Lines;
   };
 
@@ -366,8 +391,9 @@ namespace {
 
     void writeOut() {
       writeBytes(FunctionTag, 4);
+      SmallString<128> Filename = getFilename(SP);
       uint32_t BlockLen = 1 + 1 + 1 + lengthOfGCOVString(getFunctionName(SP)) +
-                          1 + lengthOfGCOVString(SP->getFilename()) + 1;
+                          1 + lengthOfGCOVString(Filename) + 1;
       if (UseCfgChecksum)
         ++BlockLen;
       write(BlockLen);
@@ -376,7 +402,7 @@ namespace {
       if (UseCfgChecksum)
         write(CfgChecksum);
       writeGCOVString(getFunctionName(SP));
-      writeGCOVString(SP->getFilename());
+      writeGCOVString(Filename);
       write(SP->getLine());
 
       // Emit count of blocks.
@@ -419,6 +445,72 @@ namespace {
     DenseMap<BasicBlock *, GCOVBlock> Blocks;
     GCOVBlock ReturnBlock;
   };
+}
+
+// RegexesStr is a string containing differents regex separated by a semi-colon.
+// For example "foo\..*$;bar\..*$".
+std::vector<Regex> GCOVProfiler::createRegexesFromString(StringRef RegexesStr) {
+  std::vector<Regex> Regexes;
+  while (!RegexesStr.empty()) {
+    std::pair<StringRef, StringRef> HeadTail = RegexesStr.split(';');
+    if (!HeadTail.first.empty()) {
+      Regex Re(HeadTail.first);
+      std::string Err;
+      if (!Re.isValid(Err)) {
+        Ctx->emitError(Twine("Regex ") + HeadTail.first +
+                       " is not valid: " + Err);
+      }
+      Regexes.emplace_back(std::move(Re));
+    }
+    RegexesStr = HeadTail.second;
+  }
+  return Regexes;
+}
+
+bool GCOVProfiler::doesFilenameMatchARegex(StringRef Filename,
+                                           std::vector<Regex> &Regexes) {
+  for (Regex &Re : Regexes) {
+    if (Re.match(Filename)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool GCOVProfiler::isFunctionInstrumented(const Function &F) {
+  if (FilterRe.empty() && ExcludeRe.empty()) {
+    return true;
+  }
+  SmallString<128> Filename = getFilename(F.getSubprogram());
+  auto It = InstrumentedFiles.find(Filename);
+  if (It != InstrumentedFiles.end()) {
+    return It->second;
+  }
+
+  SmallString<256> RealPath;
+  StringRef RealFilename;
+
+  // Path can be
+  // /usr/lib/gcc/x86_64-linux-gnu/8/../../../../include/c++/8/bits/*.h so for
+  // such a case we must get the real_path.
+  if (sys::fs::real_path(Filename, RealPath)) {
+    // real_path can fail with path like "foo.c".
+    RealFilename = Filename;
+  } else {
+    RealFilename = RealPath;
+  }
+
+  bool ShouldInstrument;
+  if (FilterRe.empty()) {
+    ShouldInstrument = !doesFilenameMatchARegex(RealFilename, ExcludeRe);
+  } else if (ExcludeRe.empty()) {
+    ShouldInstrument = doesFilenameMatchARegex(RealFilename, FilterRe);
+  } else {
+    ShouldInstrument = doesFilenameMatchARegex(RealFilename, FilterRe) &&
+                       !doesFilenameMatchARegex(RealFilename, ExcludeRe);
+  }
+  InstrumentedFiles[Filename] = ShouldInstrument;
+  return ShouldInstrument;
 }
 
 std::string GCOVProfiler::mangleName(const DICompileUnit *CU,
@@ -467,6 +559,11 @@ bool GCOVProfiler::runOnModule(Module &M, const TargetLibraryInfo &TLI) {
   this->M = &M;
   this->TLI = &TLI;
   Ctx = &M.getContext();
+
+  AddFlushBeforeForkAndExec();
+
+  FilterRe = createRegexesFromString(Options.Filter);
+  ExcludeRe = createRegexesFromString(Options.Exclude);
 
   if (Options.EmitNotes) emitProfileNotes();
   if (Options.EmitData) return emitProfileArcs();
@@ -524,6 +621,38 @@ static bool shouldKeepInEntry(BasicBlock::iterator It) {
 	return false;
 }
 
+void GCOVProfiler::AddFlushBeforeForkAndExec() {
+  SmallVector<Instruction *, 2> ForkAndExecs;
+  for (auto &F : M->functions()) {
+    for (auto &I : instructions(F)) {
+      if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+        if (Function *Callee = CI->getCalledFunction()) {
+          LibFunc LF;
+          if (TLI->getLibFunc(*Callee, LF) &&
+              (LF == LibFunc_fork || LF == LibFunc_execl ||
+               LF == LibFunc_execle || LF == LibFunc_execlp ||
+               LF == LibFunc_execv || LF == LibFunc_execvp ||
+               LF == LibFunc_execve || LF == LibFunc_execvpe ||
+               LF == LibFunc_execvP)) {
+            ForkAndExecs.push_back(&I);
+          }
+        }
+      }
+    }
+  }
+
+  // We need to split the block after the fork/exec call
+  // because else the counters for the lines after will be
+  // the same as before the call.
+  for (auto I : ForkAndExecs) {
+    IRBuilder<> Builder(I);
+    FunctionType *FTy = FunctionType::get(Builder.getVoidTy(), {}, false);
+    FunctionCallee GCOVFlush = M->getOrInsertFunction("__gcov_flush", FTy);
+    Builder.CreateCall(GCOVFlush);
+    I->getParent()->splitBasicBlock(I);
+  }
+}
+
 void GCOVProfiler::emitProfileNotes() {
   NamedMDNode *CU_Nodes = M->getNamedMetadata("llvm.dbg.cu");
   if (!CU_Nodes) return;
@@ -553,7 +682,8 @@ void GCOVProfiler::emitProfileNotes() {
     for (auto &F : M->functions()) {
       DISubprogram *SP = F.getSubprogram();
       if (!SP) continue;
-      if (!functionHasLines(F)) continue;
+      if (!functionHasLines(F) || !isFunctionInstrumented(F))
+        continue;
       // TODO: Functions using scope-based EH are currently not supported.
       if (isUsingScopeBasedEH(F)) continue;
 
@@ -573,7 +703,8 @@ void GCOVProfiler::emitProfileNotes() {
       // Add the function line number to the lines of the entry block
       // to have a counter for the function definition.
       uint32_t Line = SP->getLine();
-      Func.getBlock(&EntryBlock).getFile(SP->getFilename()).addLine(Line);
+      auto Filename = getFilename(SP);
+      Func.getBlock(&EntryBlock).getFile(Filename).addLine(Line);
 
       for (auto &BB : F) {
         GCOVBlock &Block = Func.getBlock(&BB);
@@ -604,7 +735,7 @@ void GCOVProfiler::emitProfileNotes() {
           if (SP != getDISubprogram(Loc.getScope()))
             continue;
 
-          GCOVLines &Lines = Block.getFile(SP->getFilename());
+          GCOVLines &Lines = Block.getFile(Filename);
           Lines.addLine(Loc.getLine());
         }
         Line = 0;
@@ -637,7 +768,8 @@ bool GCOVProfiler::emitProfileArcs() {
     for (auto &F : M->functions()) {
       DISubprogram *SP = F.getSubprogram();
       if (!SP) continue;
-      if (!functionHasLines(F)) continue;
+      if (!functionHasLines(F) || !isFunctionInstrumented(F))
+        continue;
       // TODO: Functions using scope-based EH are currently not supported.
       if (isUsingScopeBasedEH(F)) continue;
       if (!Result) Result = true;
@@ -678,14 +810,14 @@ bool GCOVProfiler::emitProfileArcs() {
             auto It = EdgeToCounter.find({Pred, &BB});
             assert(It != EdgeToCounter.end());
             const unsigned Edge = It->second;
-            Value *EdgeCounter =
-                BuilderForPhi.CreateConstInBoundsGEP2_64(Counters, 0, Edge);
+            Value *EdgeCounter = BuilderForPhi.CreateConstInBoundsGEP2_64(
+                Counters->getValueType(), Counters, 0, Edge);
             Phi->addIncoming(EdgeCounter, Pred);
           }
 
           // Skip phis, landingpads.
           IRBuilder<> Builder(&*BB.getFirstInsertionPt());
-          Value *Count = Builder.CreateLoad(Phi);
+          Value *Count = Builder.CreateLoad(Builder.getInt64Ty(), Phi);
           Count = Builder.CreateAdd(Count, Builder.getInt64(1));
           Builder.CreateStore(Count, Phi);
 
@@ -694,9 +826,9 @@ bool GCOVProfiler::emitProfileArcs() {
             auto It = EdgeToCounter.find({&BB, nullptr});
             assert(It != EdgeToCounter.end());
             const unsigned Edge = It->second;
-            Value *Counter =
-                Builder.CreateConstInBoundsGEP2_64(Counters, 0, Edge);
-            Value *Count = Builder.CreateLoad(Counter);
+            Value *Counter = Builder.CreateConstInBoundsGEP2_64(
+                Counters->getValueType(), Counters, 0, Edge);
+            Value *Count = Builder.CreateLoad(Builder.getInt64Ty(), Counter);
             Count = Builder.CreateAdd(Count, Builder.getInt64(1));
             Builder.CreateStore(Count, Counter);
           }
@@ -731,7 +863,7 @@ bool GCOVProfiler::emitProfileArcs() {
 
     // Initialize the environment and register the local writeout and flush
     // functions.
-    Constant *GCOVInit = M->getOrInsertFunction("llvm_gcov_init", FTy);
+    FunctionCallee GCOVInit = M->getOrInsertFunction("llvm_gcov_init", FTy);
     Builder.CreateCall(GCOVInit, {WriteoutF, FlushF});
     Builder.CreateRetVoid();
 
@@ -741,22 +873,21 @@ bool GCOVProfiler::emitProfileArcs() {
   return Result;
 }
 
-Constant *GCOVProfiler::getStartFileFunc() {
+FunctionCallee GCOVProfiler::getStartFileFunc() {
   Type *Args[] = {
     Type::getInt8PtrTy(*Ctx),  // const char *orig_filename
     Type::getInt8PtrTy(*Ctx),  // const char version[4]
     Type::getInt32Ty(*Ctx),    // uint32_t checksum
   };
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), Args, false);
-  auto *Res = M->getOrInsertFunction("llvm_gcda_start_file", FTy);
-  if (Function *FunRes = dyn_cast<Function>(Res))
-    if (auto AK = TLI->getExtAttrForI32Param(false))
-      FunRes->addParamAttr(2, AK);
+  AttributeList AL;
+  if (auto AK = TLI->getExtAttrForI32Param(false))
+    AL = AL.addParamAttribute(*Ctx, 2, AK);
+  FunctionCallee Res = M->getOrInsertFunction("llvm_gcda_start_file", FTy, AL);
   return Res;
-
 }
 
-Constant *GCOVProfiler::getEmitFunctionFunc() {
+FunctionCallee GCOVProfiler::getEmitFunctionFunc() {
   Type *Args[] = {
     Type::getInt32Ty(*Ctx),    // uint32_t ident
     Type::getInt8PtrTy(*Ctx),  // const char *function_name
@@ -765,36 +896,34 @@ Constant *GCOVProfiler::getEmitFunctionFunc() {
     Type::getInt32Ty(*Ctx),    // uint32_t cfg_checksum
   };
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), Args, false);
-  auto *Res = M->getOrInsertFunction("llvm_gcda_emit_function", FTy);
-  if (Function *FunRes = dyn_cast<Function>(Res))
-    if (auto AK = TLI->getExtAttrForI32Param(false)) {
-      FunRes->addParamAttr(0, AK);
-      FunRes->addParamAttr(2, AK);
-      FunRes->addParamAttr(3, AK);
-      FunRes->addParamAttr(4, AK);
-    }
-  return Res;
+  AttributeList AL;
+  if (auto AK = TLI->getExtAttrForI32Param(false)) {
+    AL = AL.addParamAttribute(*Ctx, 0, AK);
+    AL = AL.addParamAttribute(*Ctx, 2, AK);
+    AL = AL.addParamAttribute(*Ctx, 3, AK);
+    AL = AL.addParamAttribute(*Ctx, 4, AK);
+  }
+  return M->getOrInsertFunction("llvm_gcda_emit_function", FTy);
 }
 
-Constant *GCOVProfiler::getEmitArcsFunc() {
+FunctionCallee GCOVProfiler::getEmitArcsFunc() {
   Type *Args[] = {
     Type::getInt32Ty(*Ctx),     // uint32_t num_counters
     Type::getInt64PtrTy(*Ctx),  // uint64_t *counters
   };
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), Args, false);
-  auto *Res = M->getOrInsertFunction("llvm_gcda_emit_arcs", FTy);
-  if (Function *FunRes = dyn_cast<Function>(Res))
-    if (auto AK = TLI->getExtAttrForI32Param(false))
-      FunRes->addParamAttr(0, AK);
-  return Res;
+  AttributeList AL;
+  if (auto AK = TLI->getExtAttrForI32Param(false))
+    AL = AL.addParamAttribute(*Ctx, 0, AK);
+  return M->getOrInsertFunction("llvm_gcda_emit_arcs", FTy, AL);
 }
 
-Constant *GCOVProfiler::getSummaryInfoFunc() {
+FunctionCallee GCOVProfiler::getSummaryInfoFunc() {
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
   return M->getOrInsertFunction("llvm_gcda_summary_info", FTy);
 }
 
-Constant *GCOVProfiler::getEndFileFunc() {
+FunctionCallee GCOVProfiler::getEndFileFunc() {
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
   return M->getOrInsertFunction("llvm_gcda_end_file", FTy);
 }
@@ -814,11 +943,11 @@ Function *GCOVProfiler::insertCounterWriteout(
   BasicBlock *BB = BasicBlock::Create(*Ctx, "entry", WriteoutF);
   IRBuilder<> Builder(BB);
 
-  Constant *StartFile = getStartFileFunc();
-  Constant *EmitFunction = getEmitFunctionFunc();
-  Constant *EmitArcs = getEmitArcsFunc();
-  Constant *SummaryInfo = getSummaryInfoFunc();
-  Constant *EndFile = getEndFileFunc();
+  FunctionCallee StartFile = getStartFileFunc();
+  FunctionCallee EmitFunction = getEmitFunctionFunc();
+  FunctionCallee EmitArcs = getEmitArcsFunc();
+  FunctionCallee SummaryInfo = getSummaryInfoFunc();
+  FunctionCallee EndFile = getEndFileFunc();
 
   NamedMDNode *CUNodes = M->getNamedMetadata("llvm.dbg.cu");
   if (!CUNodes) {
@@ -955,22 +1084,32 @@ Function *GCOVProfiler::insertCounterWriteout(
   PHINode *IV =
       Builder.CreatePHI(Builder.getInt32Ty(), /*NumReservedValues*/ 2);
   IV->addIncoming(Builder.getInt32(0), BB);
-  auto *FileInfoPtr =
-      Builder.CreateInBoundsGEP(FileInfoArrayGV, {Builder.getInt32(0), IV});
-  auto *StartFileCallArgsPtr = Builder.CreateStructGEP(FileInfoPtr, 0);
+  auto *FileInfoPtr = Builder.CreateInBoundsGEP(
+      FileInfoArrayTy, FileInfoArrayGV, {Builder.getInt32(0), IV});
+  auto *StartFileCallArgsPtr =
+      Builder.CreateStructGEP(FileInfoTy, FileInfoPtr, 0);
   auto *StartFileCall = Builder.CreateCall(
       StartFile,
-      {Builder.CreateLoad(Builder.CreateStructGEP(StartFileCallArgsPtr, 0)),
-       Builder.CreateLoad(Builder.CreateStructGEP(StartFileCallArgsPtr, 1)),
-       Builder.CreateLoad(Builder.CreateStructGEP(StartFileCallArgsPtr, 2))});
+      {Builder.CreateLoad(StartFileCallArgsTy->getElementType(0),
+                          Builder.CreateStructGEP(StartFileCallArgsTy,
+                                                  StartFileCallArgsPtr, 0)),
+       Builder.CreateLoad(StartFileCallArgsTy->getElementType(1),
+                          Builder.CreateStructGEP(StartFileCallArgsTy,
+                                                  StartFileCallArgsPtr, 1)),
+       Builder.CreateLoad(StartFileCallArgsTy->getElementType(2),
+                          Builder.CreateStructGEP(StartFileCallArgsTy,
+                                                  StartFileCallArgsPtr, 2))});
   if (auto AK = TLI->getExtAttrForI32Param(false))
     StartFileCall->addParamAttr(2, AK);
   auto *NumCounters =
-      Builder.CreateLoad(Builder.CreateStructGEP(FileInfoPtr, 1));
+      Builder.CreateLoad(FileInfoTy->getElementType(1),
+                         Builder.CreateStructGEP(FileInfoTy, FileInfoPtr, 1));
   auto *EmitFunctionCallArgsArray =
-      Builder.CreateLoad(Builder.CreateStructGEP(FileInfoPtr, 2));
+      Builder.CreateLoad(FileInfoTy->getElementType(2),
+                         Builder.CreateStructGEP(FileInfoTy, FileInfoPtr, 2));
   auto *EmitArcsCallArgsArray =
-      Builder.CreateLoad(Builder.CreateStructGEP(FileInfoPtr, 3));
+      Builder.CreateLoad(FileInfoTy->getElementType(3),
+                         Builder.CreateStructGEP(FileInfoTy, FileInfoPtr, 3));
   auto *EnterCounterLoopCond =
       Builder.CreateICmpSLT(Builder.getInt32(0), NumCounters);
   Builder.CreateCondBr(EnterCounterLoopCond, CounterLoopHeader, FileLoopLatch);
@@ -978,16 +1117,26 @@ Function *GCOVProfiler::insertCounterWriteout(
   Builder.SetInsertPoint(CounterLoopHeader);
   auto *JV = Builder.CreatePHI(Builder.getInt32Ty(), /*NumReservedValues*/ 2);
   JV->addIncoming(Builder.getInt32(0), FileLoopHeader);
-  auto *EmitFunctionCallArgsPtr =
-      Builder.CreateInBoundsGEP(EmitFunctionCallArgsArray, {JV});
+  auto *EmitFunctionCallArgsPtr = Builder.CreateInBoundsGEP(
+      EmitFunctionCallArgsTy, EmitFunctionCallArgsArray, JV);
   auto *EmitFunctionCall = Builder.CreateCall(
       EmitFunction,
-      {Builder.CreateLoad(Builder.CreateStructGEP(EmitFunctionCallArgsPtr, 0)),
-       Builder.CreateLoad(Builder.CreateStructGEP(EmitFunctionCallArgsPtr, 1)),
-       Builder.CreateLoad(Builder.CreateStructGEP(EmitFunctionCallArgsPtr, 2)),
-       Builder.CreateLoad(Builder.CreateStructGEP(EmitFunctionCallArgsPtr, 3)),
-       Builder.CreateLoad(
-           Builder.CreateStructGEP(EmitFunctionCallArgsPtr, 4))});
+      {Builder.CreateLoad(EmitFunctionCallArgsTy->getElementType(0),
+                          Builder.CreateStructGEP(EmitFunctionCallArgsTy,
+                                                  EmitFunctionCallArgsPtr, 0)),
+       Builder.CreateLoad(EmitFunctionCallArgsTy->getElementType(1),
+                          Builder.CreateStructGEP(EmitFunctionCallArgsTy,
+                                                  EmitFunctionCallArgsPtr, 1)),
+       Builder.CreateLoad(EmitFunctionCallArgsTy->getElementType(2),
+                          Builder.CreateStructGEP(EmitFunctionCallArgsTy,
+                                                  EmitFunctionCallArgsPtr, 2)),
+       Builder.CreateLoad(EmitFunctionCallArgsTy->getElementType(3),
+                          Builder.CreateStructGEP(EmitFunctionCallArgsTy,
+                                                  EmitFunctionCallArgsPtr, 3)),
+       Builder.CreateLoad(EmitFunctionCallArgsTy->getElementType(4),
+                          Builder.CreateStructGEP(EmitFunctionCallArgsTy,
+                                                  EmitFunctionCallArgsPtr,
+                                                  4))});
   if (auto AK = TLI->getExtAttrForI32Param(false)) {
     EmitFunctionCall->addParamAttr(0, AK);
     EmitFunctionCall->addParamAttr(2, AK);
@@ -995,11 +1144,15 @@ Function *GCOVProfiler::insertCounterWriteout(
     EmitFunctionCall->addParamAttr(4, AK);
   }
   auto *EmitArcsCallArgsPtr =
-      Builder.CreateInBoundsGEP(EmitArcsCallArgsArray, {JV});
+      Builder.CreateInBoundsGEP(EmitArcsCallArgsTy, EmitArcsCallArgsArray, JV);
   auto *EmitArcsCall = Builder.CreateCall(
       EmitArcs,
-      {Builder.CreateLoad(Builder.CreateStructGEP(EmitArcsCallArgsPtr, 0)),
-       Builder.CreateLoad(Builder.CreateStructGEP(EmitArcsCallArgsPtr, 1))});
+      {Builder.CreateLoad(
+           EmitArcsCallArgsTy->getElementType(0),
+           Builder.CreateStructGEP(EmitArcsCallArgsTy, EmitArcsCallArgsPtr, 0)),
+       Builder.CreateLoad(EmitArcsCallArgsTy->getElementType(1),
+                          Builder.CreateStructGEP(EmitArcsCallArgsTy,
+                                                  EmitArcsCallArgsPtr, 1))});
   if (auto AK = TLI->getExtAttrForI32Param(false))
     EmitArcsCall->addParamAttr(0, AK);
   auto *NextJV = Builder.CreateAdd(JV, Builder.getInt32(1));
@@ -1039,7 +1192,7 @@ insertFlush(ArrayRef<std::pair<GlobalVariable*, MDNode*> > CountersBySP) {
   BasicBlock *Entry = BasicBlock::Create(*Ctx, "entry", FlushF);
 
   // Write out the current counters.
-  Constant *WriteoutF = M->getFunction("__llvm_gcov_writeout");
+  Function *WriteoutF = M->getFunction("__llvm_gcov_writeout");
   assert(WriteoutF && "Need to create the writeout function first!");
 
   IRBuilder<> Builder(Entry);

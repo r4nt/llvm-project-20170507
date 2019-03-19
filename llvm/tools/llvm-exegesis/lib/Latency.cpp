@@ -1,9 +1,8 @@
 //===-- Latency.cpp ---------------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -166,11 +165,12 @@ LatencySnippetGenerator::generateCodeTemplates(const Instruction &Instr) const {
   return std::move(Results);
 }
 
-const char *LatencyBenchmarkRunner::getCounterName() const {
-  const char *CounterName = State.getPfmCounters().CycleCounter;
-  if (!CounterName)
-    llvm::report_fatal_error("sched model does not define a cycle counter");
-  return CounterName;
+LatencyBenchmarkRunner::LatencyBenchmarkRunner(const LLVMState &State,
+                                               InstructionBenchmark::ModeE Mode)
+    : BenchmarkRunner(State, Mode) {
+  assert((Mode == InstructionBenchmark::Latency ||
+          Mode == InstructionBenchmark::InverseThroughput) &&
+         "invalid mode");
 }
 
 LatencyBenchmarkRunner::~LatencyBenchmarkRunner() = default;
@@ -182,9 +182,9 @@ LatencyBenchmarkRunner::runMeasurements(
   // measure several times and take the minimum value.
   constexpr const int NumMeasurements = 30;
   int64_t MinValue = std::numeric_limits<int64_t>::max();
-  const char *CounterName = getCounterName();
+  const char *CounterName = State.getPfmCounters().CycleCounter;
   if (!CounterName)
-    llvm::report_fatal_error("could not determine cycle counter name");
+    llvm::report_fatal_error("sched model does not define a cycle counter");
   for (size_t I = 0; I < NumMeasurements; ++I) {
     auto ExpectedCounterValue = Executor.runAndMeasure(CounterName);
     if (!ExpectedCounterValue)
@@ -192,8 +192,17 @@ LatencyBenchmarkRunner::runMeasurements(
     if (*ExpectedCounterValue < MinValue)
       MinValue = *ExpectedCounterValue;
   }
-  std::vector<BenchmarkMeasure> Result = {
-      BenchmarkMeasure::Create("latency", MinValue)};
+  std::vector<BenchmarkMeasure> Result;
+  switch (Mode) {
+  case InstructionBenchmark::Latency:
+    Result = {BenchmarkMeasure::Create("latency", MinValue)};
+    break;
+  case InstructionBenchmark::InverseThroughput:
+    Result = {BenchmarkMeasure::Create("inverse_throughput", MinValue)};
+    break;
+  default:
+    break;
+  }
   return std::move(Result);
 }
 

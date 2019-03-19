@@ -1,9 +1,8 @@
 //===--- PrintPreprocessedOutput.cpp - Implement the -E mode --------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -144,6 +143,8 @@ public:
                      ArrayRef<int> Ids) override;
   void PragmaWarningPush(SourceLocation Loc, int Level) override;
   void PragmaWarningPop(SourceLocation Loc) override;
+  void PragmaExecCharsetPush(SourceLocation Loc, StringRef Str) override;
+  void PragmaExecCharsetPop(SourceLocation Loc) override;
   void PragmaAssumeNonNullBegin(SourceLocation Loc) override;
   void PragmaAssumeNonNullEnd(SourceLocation Loc) override;
 
@@ -554,6 +555,24 @@ void PrintPPOutputPPCallbacks::PragmaWarningPop(SourceLocation Loc) {
   setEmittedDirectiveOnThisLine();
 }
 
+void PrintPPOutputPPCallbacks::PragmaExecCharsetPush(SourceLocation Loc,
+                                                     StringRef Str) {
+  startNewLineIfNeeded();
+  MoveToLine(Loc);
+  OS << "#pragma character_execution_set(push";
+  if (!Str.empty())
+    OS << ", " << Str;
+  OS << ')';
+  setEmittedDirectiveOnThisLine();
+}
+
+void PrintPPOutputPPCallbacks::PragmaExecCharsetPop(SourceLocation Loc) {
+  startNewLineIfNeeded();
+  MoveToLine(Loc);
+  OS << "#pragma character_execution_set(pop)";
+  setEmittedDirectiveOnThisLine();
+}
+
 void PrintPPOutputPPCallbacks::
 PragmaAssumeNonNullBegin(SourceLocation Loc) {
   startNewLineIfNeeded();
@@ -748,6 +767,11 @@ static void PrintPreprocessedTokens(Preprocessor &PP, Token &Tok,
     } else if (Tok.is(tok::annot_module_end)) {
       Callbacks->EndModule(
           reinterpret_cast<Module *>(Tok.getAnnotationValue()));
+      PP.Lex(Tok);
+      continue;
+    } else if (Tok.isAnnotation()) {
+      // Ignore annotation tokens created by pragmas - the pragmas themselves
+      // will be reproduced in the preprocessed output.
       PP.Lex(Tok);
       continue;
     } else if (IdentifierInfo *II = Tok.getIdentifierInfo()) {

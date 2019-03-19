@@ -1,9 +1,8 @@
 //===------ omptarget.cpp - Target independent OpenMP target RTL -- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is dual licensed under the MIT and the University of Illinois Open
-// Source Licenses. See LICENSE.txt for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -638,19 +637,20 @@ int target(int64_t device_id, void *host_ptr, int32_t arg_num,
         assert(tgtIdx != -1 && "Base address must be translated already.");
         // The parent lambda must be processed already and it must be the last
         // in tgt_args and tgt_offsets arrays.
-        void *HstPtrBegin = args[i];
-        void *HstPtrBase = args_base[i];
+        void *HstPtrVal = args[i];
+        void *HstPtrBegin = args_base[i];
+        void *HstPtrBase = args[idx];
         bool IsLast; // unused.
         void *TgtPtrBase =
             (void *)((intptr_t)tgt_args[tgtIdx] + tgt_offsets[tgtIdx]);
         DP("Parent lambda base " DPxMOD "\n", DPxPTR(TgtPtrBase));
         uint64_t Delta = (uint64_t)HstPtrBegin - (uint64_t)HstPtrBase;
         void *TgtPtrBegin = (void *)((uintptr_t)TgtPtrBase + Delta);
-        void *Pointer_TgtPtrBegin = Device.getTgtPtrBegin(
-            *(void **)HstPtrBegin, arg_sizes[i], IsLast, false);
+        void *Pointer_TgtPtrBegin =
+            Device.getTgtPtrBegin(HstPtrVal, arg_sizes[i], IsLast, false);
         if (!Pointer_TgtPtrBegin) {
           DP("No lambda captured variable mapped (" DPxMOD ") - ignored\n",
-             DPxPTR(*(void **)HstPtrBegin));
+             DPxPTR(HstPtrVal));
           continue;
         }
         DP("Update lambda reference (" DPxMOD ") -> [" DPxMOD "]\n",

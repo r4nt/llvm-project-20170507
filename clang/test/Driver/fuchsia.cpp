@@ -37,8 +37,15 @@
 // RUN:     | FileCheck %s -check-prefix=CHECK-STATIC
 // CHECK-STATIC: "--push-state"
 // CHECK-STATIC: "--as-needed"
-// CHECK-STATIC: "-static"
+// CHECK-STATIC: "-Bstatic"
 // CHECK-STATIC: "-lc++"
+// CHECK-STATIC: "-Bdynamic"
 // CHECK-STATIC: "-lm"
 // CHECK-STATIC: "--pop-state"
 // CHECK-STATIC: "-lc"
+
+// RUN: %clang %s -### --target=x86_64-fuchsia -nostdlib++ -fuse-ld=lld 2>&1 \
+// RUN:     | FileCheck %s -check-prefix=CHECK-NOSTDLIBXX
+// CHECK-NOSTDLIBXX-NOT: "-lc++"
+// CHECK-NOSTDLIBXX-NOT: "-lm"
+// CHECK-NOSTDLIBXX: "-lc"

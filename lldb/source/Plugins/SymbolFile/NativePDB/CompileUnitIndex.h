@@ -1,9 +1,8 @@
 //===-- CompileUnitIndex.h --------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -36,12 +35,12 @@ class PdbIndex;
 /// parts of the PDB into a single place, simplifying acess to compile unit
 /// information for the callers.
 struct CompilandIndexItem {
-  CompilandIndexItem(PdbSymUid uid,
+  CompilandIndexItem(PdbCompilandId m_id,
                      llvm::pdb::ModuleDebugStreamRef debug_stream,
                      llvm::pdb::DbiModuleDescriptor descriptor);
 
-  // uid of this compile unit.
-  PdbSymUid m_uid;
+  // index of this compile unit.
+  PdbCompilandId m_id;
 
   // debug stream.
   llvm::pdb::ModuleDebugStreamRef m_debug_stream;
@@ -76,20 +75,16 @@ struct CompilandIndexItem {
 /// global compile unit index to |CompilandIndexItem| structures.
 class CompileUnitIndex {
   PdbIndex &m_index;
-  llvm::DenseMap<lldb::user_id_t, std::unique_ptr<CompilandIndexItem>>
-      m_comp_units;
+  llvm::DenseMap<uint16_t, std::unique_ptr<CompilandIndexItem>> m_comp_units;
 
 public:
   explicit CompileUnitIndex(PdbIndex &index) : m_index(index) {}
 
   CompilandIndexItem &GetOrCreateCompiland(uint16_t modi);
-  CompilandIndexItem &GetOrCreateCompiland(PdbSymUid compiland_uid);
 
   const CompilandIndexItem *GetCompiland(uint16_t modi) const;
-  const CompilandIndexItem *GetCompiland(PdbSymUid compiland_uid) const;
 
   CompilandIndexItem *GetCompiland(uint16_t modi);
-  CompilandIndexItem *GetCompiland(PdbSymUid compiland_uid);
 
   llvm::SmallString<64> GetMainSourceFile(const CompilandIndexItem &item) const;
 };
